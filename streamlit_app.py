@@ -57,14 +57,37 @@ def raw_df_from_cleaned(cleaned_lines: list[str]):
 
 def grifols_shipment_from_df(df: pd.DataFrame):
     """Process a Grifols shipment DataFrame to extract samples and dates."""
-    # Ensure the necessary columns exist
-    if 'Sample ID' not in df.columns or 'Donation date' not in df.columns:
-        raise ValueError("QC CSV must contain 'Sample ID' and 'Donation date' columns.")
+
+    # Ensure required columns exist
+    required_cols = {'Sample ID', 'Donation date', 'Samples Packed'}
+    if not required_cols.issubset(df.columns):
+        raise ValueError(
+            "QC CSV must contain 'Sample ID', 'Donation date', and 'Samples Packed' columns."
+        )
+
+    # Remove rows with missing Sample ID
     df = df[df['Sample ID'].notna()].copy()
-    df['Donation date'] = pd.to_datetime(df['Donation date'], dayfirst=True, errors='coerce')
+
+    # Remove rows where Samples Packed == 'yes'
+    df = df[
+        ~df['Samples Packed']
+        .astype(str)
+        .str.strip()
+        .str.lower()
+        .eq('yes')
+    ]
+
+    # Parse dates
+    df['Donation date'] = pd.to_datetime(
+        df['Donation date'], dayfirst=True, errors='coerce'
+    )
+
+    # Final outputs
     samples_df = df[['Sample ID']].copy()
     date_df = df[['Donation date']].copy()
+
     return samples_df, date_df
+
 
 
 def final_df(original_data, qc_data, no_bleed, rejected, sample_only):
@@ -156,3 +179,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

@@ -177,7 +177,6 @@ def main():
                    'Sample ID': samples_to_be_packed['Sample ID'].astype('string').str.strip()
                    })
                    .sort_values('Sample ID')
-                   .reset_index(drop=False)
                 )
                 tab_labels = [
                     ("Product", product_df),
@@ -208,6 +207,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 

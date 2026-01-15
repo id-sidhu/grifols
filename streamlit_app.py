@@ -91,19 +91,37 @@ def grifols_shipment_from_df(df: pd.DataFrame):
 
 def final_df(original_data, qc_data, no_bleed, rejected, sample_only):
     """Compute samples to remove and the final summary table."""
+
+    # Normalize IDs
     original_ids = original_data['Sample ID'].astype('string').str.strip()
     qc_ids = qc_data['Sample ID'].astype('string').str.strip()
+
+    # Initial removal candidates
     to_be_removed = original_data.loc[~original_ids.isin(qc_ids)].copy()
     to_be_removed['Sample ID'] = to_be_removed['Sample ID'].astype('string').str.strip()
+
+    # Build final summary table (DISPLAY ONLY)
     final_output = pd.DataFrame({
-        'To_be_removed':  to_be_removed['Sample ID'].astype('string').str.strip().reset_index(drop=True),
+        'To_be_removed': to_be_removed['Sample ID'].reset_index(drop=True),
         'No bleeds': no_bleed['Sample ID'].astype('string').str.strip().reset_index(drop=True),
         'Rejected Units': rejected['Sample ID'].astype('string').str.strip().reset_index(drop=True),
         'Sample Only': sample_only['Sample ID'].astype('string').str.strip().reset_index(drop=True)
-    })
-    final_ids = final_output.stack().dropna().unique()
-    to_be_removed = to_be_removed[~to_be_removed['Sample ID'].isin(final_ids)]
-    return to_be_removed[['Sample ID']], final_output.fillna('')
+    }).fillna('')
+
+    # IDs that must NOT be removed
+    protected_ids = pd.concat([
+        no_bleed['Sample ID'],
+        rejected['Sample ID'],
+        sample_only['Sample ID']
+    ]).astype('string').str.strip().unique()
+
+    # Final removal list
+    to_be_removed = to_be_removed[
+        ~to_be_removed['Sample ID'].isin(protected_ids)
+    ]
+
+    return to_be_removed[['Sample ID']], final_output
+
 
 
 def display_dataframe_with_count(df: pd.DataFrame, label: str):
@@ -179,5 +197,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 

@@ -67,7 +67,7 @@ def grifols_shipment_from_df(df: pd.DataFrame):
 
     # Remove rows with missing Sample ID
     df = df[df['Sample ID'].notna()].copy()
-'''
+    '''
     # Remove rows where Samples Packed == 'yes'
     df = df[
         ~df['Samples Packed?']
@@ -76,7 +76,7 @@ def grifols_shipment_from_df(df: pd.DataFrame):
         .str.lower()
         .eq('yes')
     ]
-'''
+    '''
     # Parse dates
     df['Donation date'] = pd.to_datetime(
         df['Donation date'], dayfirst=True, errors='coerce'
@@ -200,6 +200,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 

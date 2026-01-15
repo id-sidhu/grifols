@@ -171,13 +171,21 @@ def main():
                 )
 
                 # Create tabs
+                samples_to_be_packed_sorted = (
+                   samples_to_be_packed
+                   .assign(**{
+                   'Sample ID': samples_to_be_packed['Sample ID'].astype('string').str.strip()
+                   })
+                   .sort_values('Sample ID')
+                   .reset_index(drop=True)
+                )
                 tab_labels = [
                     ("Product", product_df),
                     ("Samples", samples_df),
                     ("Rejected Units", rejected_df),
                     ("No Bleeds", no_bleeds_df),
                     ("Sample Only", sample_only_df),
-                    ("Samples to be Packed", samples_to_be_packed),
+                    ("Samples to be Packed", samples_to_be_packed_sorted),
                     ("Donation Date", dates_df),
                     ("Removed Samples", removed_samples),
                     ("Final Output", final_out)
@@ -200,6 +208,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 

@@ -70,7 +70,7 @@ def grifols_shipment_from_df(df: pd.DataFrame):
 
     # Remove rows where Samples Packed == 'yes'
     df = df[
-        ~df['Samples Packed']
+        ~df['Samples Packed?']
         .astype(str)
         .str.strip()
         .str.lower()
@@ -179,5 +179,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 

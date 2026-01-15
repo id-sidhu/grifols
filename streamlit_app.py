@@ -178,14 +178,14 @@ def main():
                   .drop(columns='_sort_key')
                 )
                 tab_labels = [
-                    ("Product", product_df),
-                    ("Samples", samples_df),
+                   # ("Product", product_df),
+                   # ("Samples", samples_df),
+                    ("Samples to be Packed", samples_to_be_packed_sorted),
+                    ("Removed Samples", removed_samples),
                     ("Rejected Units", rejected_df),
                     ("No Bleeds", no_bleeds_df),
                     ("Sample Only", sample_only_df),
-                    ("Samples to be Packed", samples_to_be_packed_sorted),
-                    ("Donation Date", dates_df),
-                    ("Removed Samples", removed_samples),
+                   # ("Donation Date", dates_df),
                     ("Final Output", final_out)
                 ]
                 tabs = st.tabs([label for label, _ in tab_labels])
@@ -206,6 +206,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 

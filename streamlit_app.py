@@ -96,7 +96,7 @@ def final_df(original_data, qc_data, no_bleed, rejected, sample_only):
     to_be_removed = original_data.loc[~original_ids.isin(qc_ids)].copy()
     to_be_removed['Sample ID'] = to_be_removed['Sample ID'].astype('string').str.strip()
     final_output = pd.DataFrame({
-        'To_be_removed':  to_be_removed['Sample ID'].astype('string').str.strip(),
+        'To_be_removed':  to_be_removed['Sample ID'].astype('string').str.strip().reset_index(drop=True),
         'No bleeds': no_bleed['Sample ID'].astype('string').str.strip().reset_index(drop=True),
         'Rejected Units': rejected['Sample ID'].astype('string').str.strip().reset_index(drop=True),
         'Sample Only': sample_only['Sample ID'].astype('string').str.strip().reset_index(drop=True)
@@ -179,4 +179,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 

@@ -59,7 +59,7 @@ def grifols_shipment_from_df(df: pd.DataFrame):
     """Process a Grifols shipment DataFrame to extract samples and dates."""
 
     # Ensure required columns exist
-    required_cols = {'Sample ID', 'Donation date', 'Samples Packed'}
+    required_cols = {'Sample ID', 'Donation date', 'Samples Packed?'}
     if not required_cols.issubset(df.columns):
         raise ValueError(
             "QC CSV must contain 'Sample ID', 'Donation date', and 'Samples Packed' columns."
@@ -179,4 +179,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 

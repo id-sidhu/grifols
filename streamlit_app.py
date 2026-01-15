@@ -172,11 +172,10 @@ def main():
 
                 # Create tabs
                 samples_to_be_packed_sorted = (
-                   samples_to_be_packed
-                   .assign(**{
-                   'Sample ID': samples_to_be_packed['Sample ID'].astype('string').str.strip()
-                   })
-                   .sort_values('Sample ID')
+                  samples_to_be_packed
+                  .assign(_sort_key=samples_to_be_packed['Sample ID'].astype(str))
+                  .sort_values('_sort_key')
+                  .drop(columns='_sort_key')
                 )
                 tab_labels = [
                     ("Product", product_df),
@@ -207,6 +206,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 

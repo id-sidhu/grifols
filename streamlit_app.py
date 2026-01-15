@@ -133,8 +133,11 @@ def display_dataframe_with_count(df: pd.DataFrame, label: str):
 
 def display_final_counts(df: pd.DataFrame):
     """Display counts per column in the final summary DataFrame."""
-    counts = df.count()
-    counts_df = pd.DataFrame({'Category': counts.index, 'Count': counts.values})
+    counts = (df != '').sum()
+    counts_df = pd.DataFrame({
+        'Category': counts.index,
+        'Count': counts.values
+    })
     st.table(counts_df)
 
 
@@ -197,6 +200,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 

@@ -474,7 +474,11 @@ def main() -> None:
             st.subheader(f"Pallet Report (Pallet {last_no})")
 
         # ---- BEAUTIFUL OUTPUT (no logic changes; just parsing the existing report_text) ----
-        report_text = st.session_state["pallet_report_text"]
+        report_text = st.session_state.get("pallet_report_text", "")
+        if not report_text:
+            st.info("Generate a pallet report to view results.")
+            return
+
         
         def _pick(label: str) -> str:
             for line in report_text.splitlines():
@@ -577,3 +581,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

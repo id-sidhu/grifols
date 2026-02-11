@@ -515,7 +515,7 @@ def main() -> None:
         st.table(summary_df)
         
         # Optional: keep the original text (collapsed)
-        with st.expander("Show raw report text"):
+        with st.expander("To verify view info.."):
             st.code(report_text)
 
             if verbose:
@@ -581,4 +581,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 

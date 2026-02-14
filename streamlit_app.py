@@ -14,24 +14,40 @@ specified date and prefix the app determines which donation numbers are
 missing (no bleeds), and separates the donations into rejected or
 "sample only" categories based on their status.
 
+In addition to these features, this version introduces two new pieces of
+functionality:
+
+1.  When both a shipment file and a unit status file are provided, the app
+    computes a set of donation IDs that appear in the unit status file
+    but do **not** appear in the shipment manifest.  These are stored
+    internally as ``not_in_manifest`` and may be queried later.  Any
+    donation IDs classified as "to be removed" (e.g. rejected or
+    sample‑only) are excluded when presenting results to the user.
+
+2.  In the unit status check section, the user may provide **two** control
+    numbers separated by a comma.  When this occurs, instead of checking
+    a single ID against the "to be removed" set, the app will display
+    all IDs from the ``not_in_manifest`` set whose numeric portion falls
+    between the two provided control numbers (inclusive) after removing
+    any IDs flagged for removal.  This enables quick discovery of ranges
+    of missing donation IDs.
+
 To run this app locally, execute the following command from a terminal in
-the directory containing this file:
+the directory containing this file::
 
-```
-streamlit run grifols_combined_streamlit.py
-```
+    streamlit run grifols_combined_streamlit.py
 
-The application expects you to upload a `grifols_shipment.csv` file (and
-optionally a `unit_status.csv` file if you want to use the cleaning and
+The application expects you to upload a ``grifols_shipment.csv`` file (and
+optionally a ``unit_status.csv`` file if you want to use the cleaning and
 unit status helpers).  You will then be prompted for the pallet number you
 are interested in, whether to see a verbose listing of F25 and F26 sample
-IDs, and (if a unit status file is supplied) the donation date and
-donation number prefix for the unit status analysis.
+IDs, and (if a unit status file is supplied) the donation prefix and
+control number(s) for the unit status analysis.
 """
 
 import datetime
 import re
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Set
 
 import numpy as np
 import pandas as pd
@@ -306,7 +322,7 @@ def generate_report_text(
     return report_text, f25_ids, f26_ids
 
 
-def process_unit_status_all(us_df: pd.DataFrame, prefix: str) -> set[str]:
+def process_unit_status_all(us_df: pd.DataFrame, prefix: str) -> Set[str]:
     """
     Build a 'to be removed' set across ALL rows (no date filter) for a given prefix.
 
@@ -338,7 +354,7 @@ def process_unit_status_all(us_df: pd.DataFrame, prefix: str) -> set[str]:
     )
 
     nums = df["donation_num"].dropna().astype(int).sort_values()
-    missing_nums: list[int] = []
+    missing_nums: List[int] = []
     if not nums.empty:
         missing_nums = sorted(set(range(nums.min(), nums.max() + 1)) - set(nums))
     no_bleeds = {f"{prefix}{n:06d}" for n in missing_nums}
@@ -384,8 +400,7 @@ def main() -> None:
         "Upload your **Grifols shipment CSV** and optionally a **unit status CSV**. "
         "Then select the pallet number you wish to inspect and choose whether to "
         "display detailed lists of sample IDs.  If a unit status file is uploaded, "
-        "you can also analyse donations on a specific date by entering a donation "
-        "date and prefix."
+        "you can also analyse donations on a specific prefix and control number(s)."
     )
 
     # File uploader for the shipment CSV.  This is required for the pallet report.
@@ -415,6 +430,22 @@ def main() -> None:
             us_df = None
     else:
         us_df = None
+
+    # Compute and store a not_in_manifest set if both DataFrames are present
+    if gs_df is not None and us_df is not None:
+        try:
+            # Clean unit status to remove undesired rows
+            cleaned_us_df_all = clean_unit_status(us_df)
+            # Prepare lists of IDs from each DataFrame
+            us_ids = cleaned_us_df_all.get("Donation #", pd.Series(dtype=str)).dropna().astype(str).str.strip()
+            shipment_ids = gs_df.get("Sample ID", pd.Series(dtype=str)).dropna().astype(str).str.strip()
+            not_in_manifest_set = set(us_ids) - set(shipment_ids)
+            st.session_state["not_in_manifest"] = sorted(not_in_manifest_set)
+        except Exception:
+            # If any error occurs, simply clear the not_in_manifest variable
+            st.session_state["not_in_manifest"] = []
+    else:
+        st.session_state["not_in_manifest"] = []
 
     # Sidebar for pallet report input controls
     with st.sidebar:
@@ -474,112 +505,158 @@ def main() -> None:
             st.subheader(f"Pallet Report (Pallet {last_no})")
 
         # ---- BEAUTIFUL OUTPUT (no logic changes; just parsing the existing report_text) ----
-        report_text = st.session_state.get("pallet_report_text", "")
-        if not report_text:
-            st.info("Generate a pallet report to view results.")
-            return
-
-        
-        def _pick(label: str) -> str:
-            for line in report_text.splitlines():
-                if line.strip().startswith(label):
-                    return line.split(":", 1)[1].strip()
-            return ""
-        
-        sop = _pick("Sample ID Where Pallet Starts")
-        eop = _pick("Sample ID Where Pallet Ends")
-        pallet_size = _pick("Total number of samples in pallet")
-        first_id = _pick("First sample ID to be packed")
-        last_id = _pick("Last sample ID to be packed")
-        f25_count = _pick("F25 count")
-        f26_count = _pick("F26 count")
-        total_to_pack = _pick("Total samples to pack")
-        
-        # KPI row
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Pallet size", pallet_size or "—")
-        c2.metric("To pack", total_to_pack or "—")
-        c3.metric("F25", f25_count or "—")
-        c4.metric("F26", f26_count or "—")
-        
-        # Clean summary table
-        summary_df = pd.DataFrame(
-            [
-                ["Start marker ID", sop or "—"],
-                ["End marker ID", eop or "—"],
-                ["First ID to pack", first_id or "—"],
-                ["Last ID to pack", last_id or "—"],
-            ],
-            columns=["Field", "Value"],
-        )
-        st.table(summary_df)
-        
-        # Optional: keep the original text (collapsed)
-        with st.expander("To verify view info.."):
-            st.code(report_text)
-
-            if verbose:
-                f25_ids = st.session_state.get("pallet_f25_ids", [])
-                f26_ids = st.session_state.get("pallet_f26_ids", [])
-                st.markdown("### F25 Sample IDs")
-                if f25_ids:
-                    f25_df = pd.DataFrame({"Sample ID": f25_ids})
-                    st.dataframe(f25_df)
-                else:
-                    st.write("No F25 IDs found.")
-                st.markdown("### F26 Sample IDs")
-                if f26_ids:
-                    f26_df = pd.DataFrame({"Sample ID": f26_ids})
-                    st.dataframe(f26_df)
-                else:
-                    st.write("No F26 IDs found.")
+        if "pallet_report_text" in st.session_state:
+            report_text = st.session_state["pallet_report_text"]
+            
+            def _pick(label: str) -> str:
+                for line in report_text.splitlines():
+                    if line.strip().startswith(label):
+                        return line.split(":", 1)[1].strip()
+                return ""
+            
+            sop = _pick("Sample ID Where Pallet Starts")
+            eop = _pick("Sample ID Where Pallet Ends")
+            pallet_size_val = _pick("Total number of samples in pallet")
+            first_id = _pick("First sample ID to be packed")
+            last_id = _pick("Last sample ID to be packed")
+            f25_count = _pick("F25 count")
+            f26_count = _pick("F26 count")
+            total_to_pack = _pick("Total samples to pack")
+            
+            # KPI row
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Pallet size", pallet_size_val or "—")
+            c2.metric("To pack", total_to_pack or "—")
+            c3.metric("F25", f25_count or "—")
+            c4.metric("F26", f26_count or "—")
+            
+            # Clean summary table
+            summary_df = pd.DataFrame(
+                [
+                    ["Start marker ID", sop or "—"],
+                    ["End marker ID", eop or "—"],
+                    ["First ID to pack", first_id or "—"],
+                    ["Last ID to pack", last_id or "—"],
+                ],
+                columns=["Field", "Value"],
+            )
+            st.table(summary_df)
+            
+            # Optional: keep the original text (collapsed)
+            with st.expander("Show raw report text"):
+                st.code(report_text)
+                
+                if verbose:
+                    f25_ids = st.session_state.get("pallet_f25_ids", [])
+                    f26_ids = st.session_state.get("pallet_f26_ids", [])
+                    st.markdown("### F25 Sample IDs")
+                    if f25_ids:
+                        f25_df = pd.DataFrame({"Sample ID": f25_ids})
+                        st.dataframe(f25_df)
+                    else:
+                        st.write("No F25 IDs found.")
+                    st.markdown("### F26 Sample IDs")
+                    if f26_ids:
+                        f26_df = pd.DataFrame({"Sample ID": f26_ids})
+                        st.dataframe(f26_df)
+                    else:
+                        st.write("No F26 IDs found.")
     else:
         st.info("Please upload a grifols_shipment.csv file to begin the pallet report.")
 
     # If unit status CSV is loaded, provide inputs and allow control number checks
     if us_df is not None:
-            st.markdown("---")
-            st.subheader("Unit Status Check")
+        st.markdown("---")
+        st.subheader("Unit Status Check")
 
-            prefix_input = st.text_input(
-                "Donation prefix", value="F26-", max_chars=20
-            ).strip()
+        prefix_input = st.text_input(
+            "Donation prefix", value="F26-", max_chars=20
+        ).strip()
 
-            suffix_input = st.text_input(
-                "Control number (enter only xxxxxx)",
-                value="",
-                placeholder="002035"
-            ).strip()
+        # Allow users to enter one control number (suffix) or two separated by a comma.
+        suffix_input = st.text_input(
+            "Control number(s) – enter one six‑digit number or two separated by a comma",
+            value="",
+            placeholder="002035 or 002030,002040",
+        ).strip()
 
-            check_btn = st.button("Check Control Number")
+        check_btn = st.button("Check Control Number(s)")
 
-            if check_btn:
-                if not suffix_input:
-                    st.error("Please enter the control number suffix.")
-                else:
-                    try:
-                        # Normalize suffix to 6 digits if numeric
-                        if suffix_input.isdigit():
-                            suffix_norm = suffix_input.zfill(6)
+        if check_btn:
+            if not suffix_input:
+                st.error("Please enter the control number(s).")
+            else:
+                try:
+                    # Clean the unit status DataFrame once per check
+                    cleaned_us_df = clean_unit_status(us_df)
+                    # Determine if range or single value
+                    if "," in suffix_input:
+                        # Range mode: expect exactly two values
+                        parts = [p.strip() for p in suffix_input.split(",") if p.strip()]
+                        if len(parts) != 2:
+                            st.error("Please enter exactly two control numbers separated by a comma.")
                         else:
-                            suffix_norm = suffix_input
-
+                            # Build full IDs (with prefix) for the range bounds
+                            full_ids: List[str] = []
+                            for part in parts:
+                                part_upper = part.upper()
+                                prefix_upper = prefix_input.upper()
+                                # If the user provided the full ID (starting with prefix), accept it
+                                if part_upper.startswith(prefix_upper):
+                                    full_ids.append(part.strip())
+                                else:
+                                    # Otherwise treat as suffix and pad if numeric
+                                    if part.isdigit():
+                                        suffix_norm = part.zfill(6)
+                                    else:
+                                        suffix_norm = part
+                                    full_ids.append(f"{prefix_input}{suffix_norm}")
+                            # Extract start and end IDs
+                            start_id, end_id = full_ids[0], full_ids[1]
+                            # Function to extract numeric portion of an ID for ordering/comparison
+                            def extract_num(x: str) -> int:
+                                m = re.match(rf"^{re.escape(prefix_input)}(\d+)$", x)
+                                if m:
+                                    return int(m.group(1))
+                                # If prefix does not match, return a large number to exclude
+                                return int(1e18)
+                            start_num = extract_num(start_id)
+                            end_num = extract_num(end_id)
+                            # Ensure start <= end
+                            if start_num > end_num:
+                                start_num, end_num = end_num, start_num
+                            # Build to_remove_set for the given prefix
+                            to_remove_set = process_unit_status_all(cleaned_us_df, prefix_input)
+                            # Filter not_in_manifest IDs for current prefix and remove those in to_remove_set
+                            not_manifest_ids = [iid for iid in st.session_state.get("not_in_manifest", []) if iid.upper().startswith(prefix_input.upper())]
+                            not_manifest_ids_filtered = [iid for iid in not_manifest_ids if iid not in to_remove_set]
+                            # Collect IDs within the numeric range
+                            ids_between = [iid for iid in not_manifest_ids_filtered if start_num <= extract_num(iid) <= end_num]
+                            ids_between_sorted = sorted(ids_between, key=extract_num)
+                            if ids_between_sorted:
+                                st.success(f"IDs in not_in_manifest between {start_id} and {end_id} (excluding removed):")
+                                ids_df = pd.DataFrame({"Missing IDs": ids_between_sorted})
+                                st.dataframe(ids_df)
+                            else:
+                                st.info("No IDs in not_in_manifest found within the specified range after excluding removed IDs.")
+                    else:
+                        # Single control number check
+                        part = suffix_input
+                        # Normalize suffix to 6 digits if numeric
+                        if part.isdigit():
+                            suffix_norm = part.zfill(6)
+                        else:
+                            suffix_norm = part
                         control_id = f"{prefix_input}{suffix_norm}"
-
-                        cleaned_us_df = clean_unit_status(us_df)
-                        to_remove_set = process_unit_status_all(
-                            cleaned_us_df, prefix_input
-                        )
-
+                        # Build the removal set
+                        to_remove_set = process_unit_status_all(cleaned_us_df, prefix_input)
                         if control_id in to_remove_set:
                             st.success(f"{control_id} is in 'to be removed'.")
                         else:
                             st.error(f"{control_id} is NOT in 'to be removed'.")
-                    except Exception as e:
-                        st.exception(e)
+                except Exception as e:
+                    st.exception(e)
 
 
 if __name__ == "__main__":
     main()
-
-

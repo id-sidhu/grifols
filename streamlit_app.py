@@ -386,6 +386,173 @@ def process_unit_status_all(us_df: pd.DataFrame, prefix: str) -> Set[str]:
     return set().union(no_bleeds, rejected, sample_only)
 
 
+# -----------------------------------------------------------------------------
+# Rack visualisation helper
+def build_rack_html(
+    valid_ids: List[str],
+    not_manifest_set: Set[str],
+    digits_to_show: int = 3,
+    fill_value: str = "",
+    title: str = "Rack Visualization (last three digits)",
+) -> str:
+    """
+    18×12 rack using a true 18-column CSS Grid (no spacer columns, no inserted blank IDs).
+    Visible separators after columns 6 and 12 are drawn INSIDE the boundary cells
+    (inset shadows), so they remain clearly visible regardless of background/theme.
+    """
+    total_positions = 216
+    ids_padded = valid_ids[:total_positions] + [""] * max(0, total_positions - len(valid_ids))
+
+    def display_text(sample_id: str) -> str:
+        if not sample_id:
+            return fill_value
+        return sample_id[-digits_to_show:]
+
+    cells_html: List[str] = []
+    for sample_id in ids_padded:
+        is_blank = not bool(sample_id)
+        is_not_manifest = (sample_id in not_manifest_set) if sample_id else False
+
+        classes = ["rack-cell"]
+        if is_blank:
+            classes.append("blank")
+        elif is_not_manifest:
+            classes.append("not-manifest")
+        else:
+            classes.append("present")
+
+        tooltip = sample_id if sample_id else "Empty"
+        cells_html.append(
+            f'<div class="{" ".join(classes)}" title="{tooltip}">{display_text(sample_id)}</div>'
+        )
+
+    cells_joined = "\n".join(cells_html)
+
+    html = f"""
+<div class="rack-wrap">
+  <div class="rack-title">{title}</div>
+
+  <div class="rack-legend">
+    <span class="legend-item"><span class="swatch present"></span> In unit status</span>
+    <span class="legend-item"><span class="swatch not-manifest"></span> Not in manifest</span>
+    <span class="legend-item"><span class="swatch blank"></span> Empty</span>
+  </div>
+
+  <div class="rack-grid">
+    {cells_joined}
+  </div>
+</div>
+
+<style>
+  .rack-wrap {{
+    padding: 12px 12px 14px 12px;
+    border: 1px solid rgba(0,0,0,0.10);
+    border-radius: 12px;
+    background: rgba(255,255,255,0.70);
+    backdrop-filter: blur(4px);
+    width: fit-content;
+    max-width: 100%;
+    overflow-x: auto;
+  }}
+
+  .rack-title {{
+    font-weight: 700;
+    font-size: 16px;
+    margin: 0 0 8px 0;
+  }}
+
+  .rack-legend {{
+    display: flex;
+    gap: 14px;
+    align-items: center;
+    font-size: 12px;
+    opacity: 0.85;
+    margin-bottom: 10px;
+    flex-wrap: wrap;
+  }}
+
+  .legend-item {{
+    display: inline-flex;
+    gap: 12px;
+    align-items: center;
+  }}
+
+  .swatch {{
+    width: 12px;
+    height: 12px;
+    border-radius: 4px;
+    border: 1px solid rgba(0,0,0,0.15);
+    display: inline-block;
+  }}
+  .swatch.present {{ background: #e6f4ea; }}
+  .swatch.not-manifest {{ background: #ffd966; }}
+  .swatch.blank {{ background: #f3f4f6; }}
+
+  /* TRUE 18-column grid (no spacer columns) */
+  .rack-grid {{
+    --cell-w: 40px;
+    --gap: 6px;
+
+    display: grid;
+    grid-auto-rows: 34px;
+    gap: var(--gap);
+    grid-template-columns: repeat(18, var(--cell-w));
+  }}
+
+  .rack-cell {{
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 8px;
+    border: 1px solid rgba(0,0,0,0.12);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+    font-weight: 700;
+    font-size: 14px;
+    letter-spacing: 0.5px;
+    user-select: none;
+    transition: transform 0.06s ease;
+    position: relative;
+  }}
+
+  .rack-cell.present {{
+    background: #e6f4ea;
+    color: rgba(0,0,0,0.72);
+  }}
+
+  .rack-cell.not-manifest {{
+    background: #ffd966;
+    color: rgba(0,0,0,0.80);
+  }}
+
+  .rack-cell.blank {{
+    background: #f3f4f6;
+    color: rgba(0,0,0,0.28);
+    font-weight: 600;
+  }}
+
+  /* Visible separators after col 6 and col 12 (right edge of those cells) */
+  .rack-grid > .rack-cell:nth-child(18n + 6),
+  .rack-grid > .rack-cell:nth-child(18n + 12) {{
+    box-shadow: inset -2px 0 0 blue;
+  }}
+
+  /* Optional: also mark the left edge of col 7 and col 13 to make a "double line" */
+  .rack-grid > .rack-cell:nth-child(18n + 7),
+  .rack-grid > .rack-cell:nth-child(18n + 13) {{
+    box-shadow: inset 2px 0 0 blue;
+  }}
+
+  /* Hover: use filter instead of box-shadow so we don't overwrite separator shadows */
+  .rack-cell:hover {{
+    transform: translateY(-1px);
+    filter: drop-shadow(0 4px 8px rgba(0,0,0,0.18));
+  }}
+</style>
+"""
+    return html
+
+
+
 def main() -> None:
     """Run the Streamlit application.
 
@@ -639,6 +806,47 @@ def main() -> None:
                                 st.dataframe(ids_df)
                             else:
                                 st.info("No IDs in not_in_manifest found within the specified range after excluding removed IDs.")
+
+                            # ------------------------------------------------------------------
+                            # Additional functionality: always show Rack visualization
+                            try:
+                                # Recompute cleaned unit status and removal set
+                                cleaned_us_full = clean_unit_status(us_df)
+                                to_remove_set_full = process_unit_status_all(cleaned_us_full, prefix_input)
+                                us_ids_cleaned_set = set(
+                                    cleaned_us_full.get("Donation #", pd.Series(dtype=str)).dropna().astype(str).str.strip()
+                                )
+                                not_manifest_set_full = set(st.session_state.get("not_in_manifest", []))
+                                # Build the full range of numeric IDs
+                                range_numbers_full = list(range(start_num, end_num + 1))
+                                # Collect IDs present in unit_status (cleaned) and not removed
+                                valid_ids_full: List[str] = []
+                                for num_val in range_numbers_full:
+                                    full_id_val = f"{prefix_input}{num_val:06d}"
+                                    # Exclude IDs marked for removal
+                                    if full_id_val in to_remove_set_full:
+                                        continue
+                                    # Include only those present in the cleaned unit status file
+                                    if full_id_val in us_ids_cleaned_set:
+                                        valid_ids_full.append(full_id_val)
+                                # Construct the rack HTML and display it.  If fewer than 216 IDs
+                                # are present, the remainder of the rack will be filled with '-'.
+                                rack_html = build_rack_html(
+                                    valid_ids_full,
+                                    not_manifest_set_full,
+                                    digits_to_show=3,
+                                    fill_value="-",
+                                )
+                                rack_html = build_rack_html(
+                                    valid_ids_full,
+                                    not_manifest_set_full,
+                                    digits_to_show=3,
+                                    fill_value="–",
+                                )
+                                st.markdown(rack_html, unsafe_allow_html=True)
+
+                            except Exception as e:
+                                st.error(f"Failed to generate rack visualisation: {e}")
                     else:
                         # Single control number check
                         part = suffix_input

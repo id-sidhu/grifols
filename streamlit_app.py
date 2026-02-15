@@ -861,7 +861,7 @@ def main() -> None:
                         if control_id in to_remove_set:
                             st.success(f"{control_id} is classified as No Bleed, Sample Only, or Rejected.")
                         else:
-                            st.error(f"{control_id} is classified as No Bleed, Sample Only, or Rejected.”)
+                            st.error(f"{control_id} is not classified as No Bleed, Sample Only, or Rejected.")
                 except Exception as e:
                     st.exception(e)
 

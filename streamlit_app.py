@@ -859,12 +859,13 @@ def main() -> None:
                         # Build the removal set
                         to_remove_set = process_unit_status_all(cleaned_us_df, prefix_input)
                         if control_id in to_remove_set:
-                            st.success(f"{control_id} is in 'to be removed'.")
+                            st.success(f"{control_id} is classified as No Bleed, Sample Only, or Rejected.")
                         else:
-                            st.error(f"{control_id} is NOT in 'to be removed'.")
+                            st.error(f"{control_id} is classified as No Bleed, Sample Only, or Rejected.”)
                 except Exception as e:
                     st.exception(e)
 
 
 if __name__ == "__main__":
     main()
+

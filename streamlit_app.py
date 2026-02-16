@@ -113,7 +113,7 @@ def remove_packed(gs_df: pd.DataFrame) -> pd.DataFrame:
     if "Samples Packed?" not in gs_df.columns:
         return gs_df
     packed_mask = (
-        gs_df["Samples Packed?"].astype(str).str.strip().str.fullmatch(r"(y|yes)", case=False, na=False)
+        gs_df["Samples Packed?"].fillna("").astype(str).str.strip().ne("")
     )
     return gs_df.loc[~packed_mask].copy()
 

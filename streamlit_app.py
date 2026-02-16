@@ -47,7 +47,7 @@ control number(s) for the unit status analysis.
 
 import datetime
 import re
-from typing import List, Tuple, Optional, Set
+from typing import Dict, List, Tuple, Optional, Set
 
 import numpy as np
 import pandas as pd
@@ -269,6 +269,48 @@ def split_ids_by_prefix(pallet_df: pd.DataFrame) -> Tuple[List[str], List[str]]:
     return f25_ids, f26_ids
 
 
+def build_pallet_map(gs_df: pd.DataFrame) -> Dict[str, int]:
+    """Return a dict mapping each Sample ID to its pallet number.
+
+    Scans the ``Comments`` column for ``START OF PALLET N`` / ``END OF PALLET N``
+    markers and assigns every Sample ID found between those markers to pallet N.
+
+    Parameters
+    ----------
+    gs_df: pd.DataFrame
+        The Grifols shipment DataFrame.
+
+    Returns
+    -------
+    Dict[str, int]
+        A mapping of sample ID string → pallet number integer.
+    """
+    if "Comments" not in gs_df.columns or "Sample ID" not in gs_df.columns:
+        return {}
+    comments = gs_df["Comments"].fillna("").astype(str)
+    # Discover all pallet numbers present in the file
+    pallet_nums: set = set()
+    for comment in comments:
+        m = re.match(r"^\s*START\s+OF\s+PALLET\s+(\d+)\s*$", comment, re.IGNORECASE)
+        if m:
+            pallet_nums.add(int(m.group(1)))
+    pallet_map: Dict[str, int] = {}
+    for pnum in sorted(pallet_nums):
+        sop_pat = re.compile(rf"^\s*START\s+OF\s+PALLET\s+{pnum}\s*$", re.IGNORECASE)
+        eop_pat = re.compile(rf"^\s*END\s+OF\s+PALLET\s+{pnum}\s*$", re.IGNORECASE)
+        sop_rows = gs_df.index[comments.str.match(sop_pat)]
+        eop_rows = gs_df.index[comments.str.match(eop_pat)]
+        if sop_rows.empty or eop_rows.empty:
+            continue
+        sop_row, eop_row = int(sop_rows[0]), int(eop_rows[0])
+        if sop_row > eop_row:
+            sop_row, eop_row = eop_row, sop_row
+        for sid in gs_df.loc[sop_row:eop_row, "Sample ID"].dropna().astype(str).str.strip():
+            if sid:
+                pallet_map[sid] = pnum
+    return pallet_map
+
+
 def generate_report_text(
     pallet_df: pd.DataFrame,
     pallet_size: int,
@@ -422,6 +464,7 @@ def build_rack_html(
     valid_ids: List[str],
     not_manifest_set: Set[str],
     samples_collected_set: Optional[Set[str]] = None,
+    pallet_map: Optional[Dict[str, int]] = None,
     digits_to_show: int = 3,
     fill_value: str = "",
     title: str = "Rack Visualization (last three digits)",
@@ -440,11 +483,30 @@ def build_rack_html(
         return sample_id[-digits_to_show:]
 
     _samples_collected = samples_collected_set or set()
+    _pallet_map = pallet_map or {}
+    pallets_in_rack = sorted({_pallet_map[sid] for sid in ids_padded if sid and sid in _pallet_map})
+    has_sc_in_rack = any(sid in _samples_collected for sid in ids_padded if sid)
+    has_not_manifest_in_rack = any(sid in not_manifest_set for sid in ids_padded if sid)
+    # Build legend HTML as a Python string to avoid 4-space indentation being
+    # misinterpreted as a Markdown code block by Streamlit's renderer.
+    _legend_parts: List[str] = []
+    if pallets_in_rack:
+        for _p in pallets_in_rack:
+            _legend_parts.append(f'<span class="legend-item"><span class="swatch pallet-{_p}"></span> Pallet {_p}</span>')
+    else:
+        _legend_parts.append('<span class="legend-item"><span class="swatch present"></span> In unit status</span>')
+    if has_not_manifest_in_rack:
+        _legend_parts.append('<span class="legend-item"><span class="swatch not-manifest"></span> Not in manifest</span>')
+    if has_sc_in_rack:
+        _legend_parts.append('<span class="legend-item"><span class="swatch samples-collected"></span> Rejected (samples collected)</span>')
+    _legend_parts.append('<span class="legend-item"><span class="swatch blank"></span> Empty</span>')
+    legend_html = "".join(_legend_parts)
     cells_html: List[str] = []
     for sample_id in ids_padded:
         is_blank = not bool(sample_id)
         is_not_manifest = (sample_id in not_manifest_set) if sample_id else False
         is_samples_collected = (sample_id in _samples_collected) if sample_id else False
+        pallet_num = _pallet_map.get(sample_id) if sample_id else None
 
         classes = ["rack-cell"]
         if is_blank:
@@ -453,6 +515,8 @@ def build_rack_html(
             classes.append("not-manifest")
         elif is_samples_collected:
             classes.append("samples-collected")
+        elif pallet_num is not None:
+            classes.append(f"pallet-{pallet_num}")
         else:
             classes.append("present")
 
@@ -468,10 +532,7 @@ def build_rack_html(
   <div class="rack-title">{title}</div>
 
   <div class="rack-legend">
-    <span class="legend-item"><span class="swatch present"></span> In unit status</span>
-    <span class="legend-item"><span class="swatch not-manifest"></span> Not in manifest</span>
-    <span class="legend-item"><span class="swatch samples-collected"></span> Rejected (samples collected)</span>
-    <span class="legend-item"><span class="swatch blank"></span> Empty</span>
+    {legend_html}
   </div>
 
   <div class="rack-grid">
@@ -524,6 +585,12 @@ def build_rack_html(
   .swatch.not-manifest {{ background: #ffd966; }}
   .swatch.samples-collected {{ background: #ffb3b3; }}
   .swatch.blank {{ background: #f3f4f6; }}
+  .swatch.pallet-1 {{ background: #b3d9ff; }}
+  .swatch.pallet-2 {{ background: #d4b0f7; }}
+  .swatch.pallet-3 {{ background: #b3f0d4; }}
+  .swatch.pallet-4 {{ background: #ffd1a3; }}
+  .swatch.pallet-5 {{ background: #ffb3d9; }}
+  .swatch.pallet-6 {{ background: #d9f0b3; }}
 
   /* TRUE 18-column grid (no spacer columns) */
   .rack-grid {{
@@ -565,6 +632,13 @@ def build_rack_html(
     background: #ffb3b3;
     color: rgba(0,0,0,0.80);
   }}
+
+  .rack-cell.pallet-1 {{ background: #b3d9ff; color: rgba(0,0,0,0.80); }}
+  .rack-cell.pallet-2 {{ background: #d4b0f7; color: rgba(0,0,0,0.80); }}
+  .rack-cell.pallet-3 {{ background: #b3f0d4; color: rgba(0,0,0,0.80); }}
+  .rack-cell.pallet-4 {{ background: #ffd1a3; color: rgba(0,0,0,0.80); }}
+  .rack-cell.pallet-5 {{ background: #ffb3d9; color: rgba(0,0,0,0.80); }}
+  .rack-cell.pallet-6 {{ background: #d9f0b3; color: rgba(0,0,0,0.80); }}
 
   .rack-cell.blank {{
     background: #f3f4f6;
@@ -879,12 +953,15 @@ def main() -> None:
                                     # Include only those present in the cleaned unit status file
                                     if full_id_val in us_ids_cleaned_set:
                                         valid_ids_full.append(full_id_val)
-                                # Construct the rack HTML and display it.  Rejected units whose
-                                # samples were collected appear in orange; not-in-manifest in yellow.
+                                # Construct the rack HTML and display it.
+                                # Cells are coloured by pallet (if shipment file loaded),
+                                # with special overrides for not-in-manifest and samples-collected.
+                                pallet_map = build_pallet_map(gs_df) if gs_df is not None else {}
                                 rack_html = build_rack_html(
                                     valid_ids_full,
                                     not_manifest_set_full,
                                     samples_collected_set=samples_collected_set_full,
+                                    pallet_map=pallet_map,
                                     digits_to_show=3,
                                     fill_value="–",
                                 )

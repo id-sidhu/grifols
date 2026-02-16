@@ -73,8 +73,20 @@ def clean_unit_status(us_df: pd.DataFrame) -> pd.DataFrame:
     """
     if "Status" not in us_df.columns:
         return us_df
-    # Drop rows where the Status contains "ejec" (case insensitive)
+    # Drop rows where the Status contains "ejec" (case insensitive).
+    # Note: "Rejected" also contains "ejec", so ALL rejected rows match this.
     mask_ejec = us_df["Status"].astype(str).str.contains("ejec", case=False, na=False)
+    # Exception: if the 'Reasons/ Notes' column says samples were actually
+    # collected (contains "samples collected" but NOT "no samples collected"),
+    # keep the row so it can be classified separately downstream.
+    reasons_col = "Reasons/ Notes"
+    if reasons_col in us_df.columns:
+        notes_lower = us_df[reasons_col].fillna("").astype(str).str.lower()
+        has_sc = notes_lower.str.contains("samples collected", na=False)
+        has_no_sc = notes_lower.str.contains("no samples collected", na=False)
+        samples_were_collected = has_sc & ~has_no_sc
+        # Narrow the ejec mask: only drop ejec rows where samples were NOT collected
+        mask_ejec = mask_ejec & ~samples_were_collected
     # Drop rows where the Status is exactly "S" (case insensitive).  We use
     # fullmatch to ensure we don't accidentally match longer strings.
     mask_s = us_df["Status"].astype(str).str.fullmatch(r"s", case=False, na=False)
@@ -380,10 +392,28 @@ def process_unit_status_all(us_df: pd.DataFrame, prefix: str) -> Set[str]:
 
     df["Type"] = df["Status_normalized"].map(classify)
 
-    rejected = set(df.loc[df["Type"] == "rejected", "Donation #"].dropna().astype(str).tolist())
+    # Build rejected set, but exclude units whose 'Reasons/ Notes' indicates
+    # samples were actually collected (i.e. note contains "samples collected"
+    # but NOT "no samples collected").
+    rejected_mask = df["Type"] == "rejected"
+    samples_collected_rejected: Set[str] = set()
+    reasons_col = "Reasons/ Notes"
+    if reasons_col in df.columns:
+        notes_lower = df[reasons_col].fillna("").astype(str).str.lower()
+        has_samples_collected = notes_lower.str.contains("samples collected", na=False)
+        has_no_samples_collected = notes_lower.str.contains("no samples collected", na=False)
+        # Keep (do not remove) rejected units where samples were collected
+        samples_were_collected = has_samples_collected & ~has_no_samples_collected
+        rejected_mask = rejected_mask & ~samples_were_collected
+        # Track these kept IDs so callers can highlight them separately
+        samples_collected_rejected = set(
+            df.loc[(df["Type"] == "rejected") & samples_were_collected, "Donation #"]
+            .dropna().astype(str).tolist()
+        )
+    rejected = set(df.loc[rejected_mask, "Donation #"].dropna().astype(str).tolist())
     sample_only = set(df.loc[df["Type"] == "sample_only", "Donation #"].dropna().astype(str).tolist())
 
-    return set().union(no_bleeds, rejected, sample_only)
+    return set().union(no_bleeds, rejected, sample_only), samples_collected_rejected
 
 
 # -----------------------------------------------------------------------------
@@ -391,6 +421,7 @@ def process_unit_status_all(us_df: pd.DataFrame, prefix: str) -> Set[str]:
 def build_rack_html(
     valid_ids: List[str],
     not_manifest_set: Set[str],
+    samples_collected_set: Optional[Set[str]] = None,
     digits_to_show: int = 3,
     fill_value: str = "",
     title: str = "Rack Visualization (last three digits)",
@@ -408,16 +439,20 @@ def build_rack_html(
             return fill_value
         return sample_id[-digits_to_show:]
 
+    _samples_collected = samples_collected_set or set()
     cells_html: List[str] = []
     for sample_id in ids_padded:
         is_blank = not bool(sample_id)
         is_not_manifest = (sample_id in not_manifest_set) if sample_id else False
+        is_samples_collected = (sample_id in _samples_collected) if sample_id else False
 
         classes = ["rack-cell"]
         if is_blank:
             classes.append("blank")
         elif is_not_manifest:
             classes.append("not-manifest")
+        elif is_samples_collected:
+            classes.append("samples-collected")
         else:
             classes.append("present")
 
@@ -435,6 +470,7 @@ def build_rack_html(
   <div class="rack-legend">
     <span class="legend-item"><span class="swatch present"></span> In unit status</span>
     <span class="legend-item"><span class="swatch not-manifest"></span> Not in manifest</span>
+    <span class="legend-item"><span class="swatch samples-collected"></span> Rejected (samples collected)</span>
     <span class="legend-item"><span class="swatch blank"></span> Empty</span>
   </div>
 
@@ -486,6 +522,7 @@ def build_rack_html(
   }}
   .swatch.present {{ background: #e6f4ea; }}
   .swatch.not-manifest {{ background: #ffd966; }}
+  .swatch.samples-collected {{ background: #ffb3b3; }}
   .swatch.blank {{ background: #f3f4f6; }}
 
   /* TRUE 18-column grid (no spacer columns) */
@@ -521,6 +558,11 @@ def build_rack_html(
 
   .rack-cell.not-manifest {{
     background: #ffd966;
+    color: rgba(0,0,0,0.80);
+  }}
+
+  .rack-cell.samples-collected {{
+    background: #ffb3b3;
     color: rgba(0,0,0,0.80);
   }}
 
@@ -793,7 +835,7 @@ def main() -> None:
                             if start_num > end_num:
                                 start_num, end_num = end_num, start_num
                             # Build to_remove_set for the given prefix
-                            to_remove_set = process_unit_status_all(cleaned_us_df, prefix_input)
+                            to_remove_set, samples_collected_set = process_unit_status_all(cleaned_us_df, prefix_input)
                             # Filter not_in_manifest IDs for current prefix and remove those in to_remove_set
                             not_manifest_ids = [iid for iid in st.session_state.get("not_in_manifest", []) if iid.upper().startswith(prefix_input.upper())]
                             not_manifest_ids_filtered = [iid for iid in not_manifest_ids if iid not in to_remove_set]
@@ -806,13 +848,21 @@ def main() -> None:
                                 st.dataframe(ids_df)
                             else:
                                 st.info("No IDs in not_in_manifest found within the specified range after excluding removed IDs.")
+                            # Show rejected units whose samples were collected, within the range
+                            sc_in_range = sorted(
+                                [iid for iid in samples_collected_set if start_num <= extract_num(iid) <= end_num],
+                                key=extract_num,
+                            )
+                            if sc_in_range:
+                                st.warning(f"{len(sc_in_range)} rejected unit(s) in this range have samples collected and are NOT removed:")
+                                st.dataframe(pd.DataFrame({"Rejected – Samples Collected": sc_in_range}))
 
                             # ------------------------------------------------------------------
                             # Additional functionality: always show Rack visualization
                             try:
                                 # Recompute cleaned unit status and removal set
                                 cleaned_us_full = clean_unit_status(us_df)
-                                to_remove_set_full = process_unit_status_all(cleaned_us_full, prefix_input)
+                                to_remove_set_full, samples_collected_set_full = process_unit_status_all(cleaned_us_full, prefix_input)
                                 us_ids_cleaned_set = set(
                                     cleaned_us_full.get("Donation #", pd.Series(dtype=str)).dropna().astype(str).str.strip()
                                 )
@@ -829,17 +879,12 @@ def main() -> None:
                                     # Include only those present in the cleaned unit status file
                                     if full_id_val in us_ids_cleaned_set:
                                         valid_ids_full.append(full_id_val)
-                                # Construct the rack HTML and display it.  If fewer than 216 IDs
-                                # are present, the remainder of the rack will be filled with '-'.
+                                # Construct the rack HTML and display it.  Rejected units whose
+                                # samples were collected appear in orange; not-in-manifest in yellow.
                                 rack_html = build_rack_html(
                                     valid_ids_full,
                                     not_manifest_set_full,
-                                    digits_to_show=3,
-                                    fill_value="-",
-                                )
-                                rack_html = build_rack_html(
-                                    valid_ids_full,
-                                    not_manifest_set_full,
+                                    samples_collected_set=samples_collected_set_full,
                                     digits_to_show=3,
                                     fill_value="–",
                                 )
@@ -857,8 +902,12 @@ def main() -> None:
                             suffix_norm = part
                         control_id = f"{prefix_input}{suffix_norm}"
                         # Build the removal set
-                        to_remove_set = process_unit_status_all(cleaned_us_df, prefix_input)
-                        if control_id in to_remove_set:
+                        to_remove_set, samples_collected_set = process_unit_status_all(cleaned_us_df, prefix_input)
+                        if control_id in samples_collected_set:
+                            st.warning(
+                                f"{control_id} is **Rejected** but samples were collected."
+                            )
+                        elif control_id in to_remove_set:
                             st.success(f"{control_id} is classified as No Bleed, Sample Only, or Rejected.")
                         else:
                             st.error(f"{control_id} is not classified as No Bleed, Sample Only, or Rejected.")
@@ -868,4 +917,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

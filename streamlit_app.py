@@ -1232,6 +1232,52 @@ def main() -> None:
                 else:
                     st.warning(f"{search_full_pb} not found in any pre-built rack.")
 
+            # Filter by pallet — quickly find racks containing a specific pallet
+            if gs_df is not None:
+                _pallet_map_filter = build_pallet_map(gs_df)
+                if _pallet_map_filter:
+                    _available_pallets = sorted(set(_pallet_map_filter.values()))
+                    _pallet_options = ["—"] + [f"Pallet {p}" for p in _available_pallets]
+                    _selected_pallet = st.selectbox(
+                        "Filter racks by pallet",
+                        options=_pallet_options,
+                        key="pb_pallet_filter",
+                    )
+                    if _selected_pallet != "—":
+                        _pnum = int(_selected_pallet.split()[-1])
+                        _pallet_sids = {
+                            sid for sid, p in _pallet_map_filter.items() if p == _pnum
+                        }
+                        _matching_racks: Dict[int, int] = {}
+                        _total_pallet_samples = 0
+                        for ridx, rids in pb_racks.items():
+                            cnt = sum(1 for sid in rids if sid and sid in _pallet_sids)
+                            if cnt > 0:
+                                _matching_racks[ridx] = cnt
+                                _total_pallet_samples += cnt
+                        if _matching_racks:
+                            st.info(
+                                f"**{_total_pallet_samples}** sample(s) from Pallet {_pnum} "
+                                f"found across **{len(_matching_racks)}** rack(s)"
+                            )
+                            # Jump buttons in rows of up to 6
+                            _rack_items = list(_matching_racks.items())
+                            for _row_start in range(0, len(_rack_items), 6):
+                                _row_chunk = _rack_items[_row_start : _row_start + 6]
+                                _jump_cols = st.columns(len(_row_chunk))
+                                for _ci, (ridx, cnt) in enumerate(_row_chunk):
+                                    with _jump_cols[_ci]:
+                                        if st.button(
+                                            f"Rack {ridx + 1} ({cnt})",
+                                            key=f"pb_pjump_{_pnum}_{ridx}",
+                                        ):
+                                            current_pb_idx = ridx
+                                            st.session_state["pb_current_rack"] = ridx
+                        else:
+                            st.warning(
+                                f"No samples from Pallet {_pnum} found in any rack."
+                            )
+
             # Navigation row — avoid st.rerun() so toggle states survive navigation
             nav_c1, nav_c2, nav_c3 = st.columns([1, 5, 1])
             with nav_c1:

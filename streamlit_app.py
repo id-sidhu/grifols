@@ -459,20 +459,63 @@ def process_unit_status_all(us_df: pd.DataFrame, prefix: str) -> Set[str]:
 
 
 # -----------------------------------------------------------------------------
+# Donation date parsing helper
+def _parse_donation_date(raw) -> Optional[datetime.date]:
+    """Parse a raw Donation Date value into a datetime.date for comparison.
+
+    Handles:
+    - pandas Timestamp / datetime objects
+    - Strings in DD.MM.YYYY, YYYY-MM-DD, MM/DD/YYYY, DD/MM/YYYY formats
+    - Excel serial numbers (numeric, > 1)
+
+    Returns None when the value cannot be parsed.
+    """
+    if raw is None or (isinstance(raw, float) and pd.isna(raw)):
+        return None
+    if isinstance(raw, (pd.Timestamp, datetime.datetime)):
+        try:
+            return pd.Timestamp(raw).date()
+        except Exception:
+            pass
+    if isinstance(raw, datetime.date):
+        return raw
+    s = str(raw).strip()
+    for fmt in ("%d.%m.%Y", "%Y-%m-%d", "%m/%d/%Y", "%d/%m/%Y",
+                "%d.%m.%y", "%Y%m%d"):
+        try:
+            return datetime.datetime.strptime(s, fmt).date()
+        except ValueError:
+            pass
+    # Excel serial number (float/int stored as text)
+    try:
+        n = float(s)
+        if n > 1:
+            return (datetime.datetime(1899, 12, 30) + datetime.timedelta(days=int(n))).date()
+    except (ValueError, OverflowError, OSError):
+        pass
+    return None
+
+
+# -----------------------------------------------------------------------------
 # Rack visualisation helper
 def build_rack_html(
     valid_ids: List[str],
     not_manifest_set: Set[str],
     samples_collected_set: Optional[Set[str]] = None,
     pallet_map: Optional[Dict[str, int]] = None,
+    packed_set: Optional[Set[str]] = None,
     digits_to_show: int = 3,
     fill_value: str = "",
     title: str = "Rack Visualization (last three digits)",
+    date_range_str: Optional[str] = None,
 ) -> str:
     """
     18×12 rack using a true 18-column CSS Grid (no spacer columns, no inserted blank IDs).
     Visible separators after columns 6 and 12 are drawn INSIDE the boundary cells
     (inset shadows), so they remain clearly visible regardless of background/theme.
+    Cells whose sample IDs appear in ``packed_set`` receive a diagonal hatching
+    overlay so they are visually marked as already packed while retaining their
+    underlying colour.
     """
     total_positions = 216
     ids_padded = valid_ids[:total_positions] + [""] * max(0, total_positions - len(valid_ids))
@@ -484,9 +527,11 @@ def build_rack_html(
 
     _samples_collected = samples_collected_set or set()
     _pallet_map = pallet_map or {}
+    _packed_set = packed_set or set()
     pallets_in_rack = sorted({_pallet_map[sid] for sid in ids_padded if sid and sid in _pallet_map})
     has_sc_in_rack = any(sid in _samples_collected for sid in ids_padded if sid)
     has_not_manifest_in_rack = any(sid in not_manifest_set for sid in ids_padded if sid)
+    has_packed_in_rack = any(sid in _packed_set for sid in ids_padded if sid)
     # Build legend HTML as a Python string to avoid 4-space indentation being
     # misinterpreted as a Markdown code block by Streamlit's renderer.
     _legend_parts: List[str] = []
@@ -499,6 +544,8 @@ def build_rack_html(
         _legend_parts.append('<span class="legend-item"><span class="swatch not-manifest"></span> Not in manifest</span>')
     if has_sc_in_rack:
         _legend_parts.append('<span class="legend-item"><span class="swatch samples-collected"></span> Rejected (samples collected)</span>')
+    if has_packed_in_rack:
+        _legend_parts.append('<span class="legend-item"><span class="swatch packed-swatch"></span> Already packed</span>')
     _legend_parts.append('<span class="legend-item"><span class="swatch blank"></span> Empty</span>')
     legend_html = "".join(_legend_parts)
     cells_html: List[str] = []
@@ -506,6 +553,7 @@ def build_rack_html(
         is_blank = not bool(sample_id)
         is_not_manifest = (sample_id in not_manifest_set) if sample_id else False
         is_samples_collected = (sample_id in _samples_collected) if sample_id else False
+        is_packed = (sample_id in _packed_set) if sample_id else False
         pallet_num = _pallet_map.get(sample_id) if sample_id else None
 
         classes = ["rack-cell"]
@@ -520,12 +568,22 @@ def build_rack_html(
         else:
             classes.append("present")
 
-        tooltip = sample_id if sample_id else "Empty"
+        # packed is an additive overlay class – applied on top of the colour class
+        if is_packed:
+            classes.append("packed")
+
+        tooltip = (sample_id + " [PACKED]") if is_packed and sample_id else (sample_id if sample_id else "Empty")
         cells_html.append(
             f'<div class="{" ".join(classes)}" title="{tooltip}">{display_text(sample_id)}</div>'
         )
 
     cells_joined = "\n".join(cells_html)
+
+    _date_range_html = (
+        f'<span class="rack-date-range">{date_range_str}</span>'
+        if date_range_str
+        else ""
+    )
 
     html = f"""
 <div class="rack-wrap">
@@ -533,6 +591,7 @@ def build_rack_html(
 
   <div class="rack-legend">
     {legend_html}
+    {_date_range_html}
   </div>
 
   <div class="rack-grid">
@@ -568,6 +627,14 @@ def build_rack_html(
     flex-wrap: wrap;
   }}
 
+  .rack-date-range {{
+    margin-left: auto;
+    font-size: 12px;
+    opacity: 0.75;
+    white-space: nowrap;
+    font-style: italic;
+  }}
+
   .legend-item {{
     display: inline-flex;
     gap: 12px;
@@ -585,12 +652,12 @@ def build_rack_html(
   .swatch.not-manifest {{ background: #ffd966; }}
   .swatch.samples-collected {{ background: #ffb3b3; }}
   .swatch.blank {{ background: #f3f4f6; }}
-  .swatch.pallet-1 {{ background: #b3d9ff; }}
-  .swatch.pallet-2 {{ background: #d4b0f7; }}
-  .swatch.pallet-3 {{ background: #b3f0d4; }}
-  .swatch.pallet-4 {{ background: #ffd1a3; }}
-  .swatch.pallet-5 {{ background: #ffb3d9; }}
-  .swatch.pallet-6 {{ background: #d9f0b3; }}
+  .swatch.pallet-1 {{ background: #8ecae6; }}
+  .swatch.pallet-2 {{ background: #c77dff; }}
+  .swatch.pallet-3 {{ background: #76d9a3; }}
+  .swatch.pallet-4 {{ background: #ff9f40; }}
+  .swatch.pallet-5 {{ background: #ff6b9d; }}
+  .swatch.pallet-6 {{ background: #ffdd44; }}
 
   /* TRUE 18-column grid (no spacer columns) */
   .rack-grid {{
@@ -633,17 +700,48 @@ def build_rack_html(
     color: rgba(0,0,0,0.80);
   }}
 
-  .rack-cell.pallet-1 {{ background: #b3d9ff; color: rgba(0,0,0,0.80); }}
-  .rack-cell.pallet-2 {{ background: #d4b0f7; color: rgba(0,0,0,0.80); }}
-  .rack-cell.pallet-3 {{ background: #b3f0d4; color: rgba(0,0,0,0.80); }}
-  .rack-cell.pallet-4 {{ background: #ffd1a3; color: rgba(0,0,0,0.80); }}
-  .rack-cell.pallet-5 {{ background: #ffb3d9; color: rgba(0,0,0,0.80); }}
-  .rack-cell.pallet-6 {{ background: #d9f0b3; color: rgba(0,0,0,0.80); }}
+  .rack-cell.pallet-1 {{ background: #8ecae6; color: rgba(0,0,0,0.80); }}
+  .rack-cell.pallet-2 {{ background: #c77dff; color: rgba(0,0,0,0.80); }}
+  .rack-cell.pallet-3 {{ background: #76d9a3; color: rgba(0,0,0,0.80); }}
+  .rack-cell.pallet-4 {{ background: #ff9f40; color: rgba(0,0,0,0.80); }}
+  .rack-cell.pallet-5 {{ background: #ff6b9d; color: rgba(0,0,0,0.80); }}
+  .rack-cell.pallet-6 {{ background: #ffdd44; color: rgba(0,0,0,0.80); }}
 
   .rack-cell.blank {{
     background: #f3f4f6;
     color: rgba(0,0,0,0.28);
     font-weight: 600;
+  }}
+
+  /* Solid strikethrough line for already-packed cells */
+  .rack-cell.packed::after {{
+    content: '';
+    position: absolute;
+    left: 4px;
+    right: 4px;
+    top: 50%;
+    height: 2px;
+    background: rgba(0, 0, 0, 0.65);
+    transform: translateY(-50%);
+    pointer-events: none;
+    border-radius: 1px;
+  }}
+
+  /* Legend swatch for packed */
+  .swatch.packed-swatch {{
+    background: #d0d0d0;
+    position: relative;
+  }}
+  .swatch.packed-swatch::after {{
+    content: '';
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: 50%;
+    height: 2px;
+    background: rgba(0, 0, 0, 0.65);
+    transform: translateY(-50%);
+    border-radius: 1px;
   }}
 
   /* Visible separators after col 6 and col 12 (right edge of those cells) */
@@ -957,15 +1055,21 @@ def main() -> None:
                                 # Cells are coloured by pallet (if shipment file loaded),
                                 # with special overrides for not-in-manifest and samples-collected.
                                 pallet_map = build_pallet_map(gs_df) if gs_df is not None else {}
-                                rack_html = build_rack_html(
-                                    valid_ids_full,
-                                    not_manifest_set_full,
-                                    samples_collected_set=samples_collected_set_full,
-                                    pallet_map=pallet_map,
-                                    digits_to_show=3,
-                                    fill_value="–",
-                                )
-                                st.markdown(rack_html, unsafe_allow_html=True)
+                                # Build packed_set: sample IDs from the shipment file
+                                # where "Samples Packed?" is non-empty.
+                                packed_set_rack: Set[str] = set()
+                                if gs_df is not None and "Samples Packed?" in gs_df.columns and "Sample ID" in gs_df.columns:
+                                    _packed_mask = gs_df["Samples Packed?"].fillna("").astype(str).str.strip().ne("")
+                                    packed_set_rack = set(
+                                        gs_df.loc[_packed_mask, "Sample ID"].dropna().astype(str).str.strip()
+                                    )
+                                st.session_state["rack_data"] = {
+                                    "valid_ids": valid_ids_full,
+                                    "not_manifest_set": not_manifest_set_full,
+                                    "samples_collected_set": samples_collected_set_full,
+                                    "pallet_map": pallet_map,
+                                    "packed_set": packed_set_rack,
+                                }
 
                             except Exception as e:
                                 st.error(f"Failed to generate rack visualisation: {e}")
@@ -990,6 +1094,371 @@ def main() -> None:
                             st.error(f"{control_id} is not classified as No Bleed, Sample Only, or Rejected.")
                 except Exception as e:
                     st.exception(e)
+
+        # Rack toggle + render — lives outside the button-click guard so that
+        # toggling instantly re-renders without requiring another button click.
+        if "rack_data" in st.session_state:
+            hide_packed = st.toggle(
+                "Hide packed samples", value=False, key="rack_hide_packed"
+            )
+            _rd = st.session_state["rack_data"]
+            _display_ids = _rd["valid_ids"]
+            _display_packed = _rd["packed_set"]
+            if hide_packed:
+                _display_ids = [
+                    "" if sid in _rd["packed_set"] else sid for sid in _display_ids
+                ]
+                _display_packed = set()
+            else:
+                show_strikethrough = st.toggle(
+                    "Show strikethrough on packed samples",
+                    value=True,
+                    key="rack_show_strikethrough",
+                )
+                if not show_strikethrough:
+                    _display_packed = set()
+            _rack_html = build_rack_html(
+                _display_ids,
+                _rd["not_manifest_set"],
+                samples_collected_set=_rd["samples_collected_set"],
+                pallet_map=_rd["pallet_map"],
+                packed_set=_display_packed,
+                digits_to_show=3,
+                fill_value="–",
+            )
+            st.markdown(_rack_html, unsafe_allow_html=True)
+
+        # ------------------------------------------------------------------
+        # Pre-built Rack Browser
+        st.markdown("---")
+        st.subheader("Pre-built Rack Browser")
+        st.write(
+            "Automatically builds sequential racks of 216 samples from the unit "
+            "status file. Search for any unit ID to jump straight to its rack. "
+            "Enable **Edit positions** to rearrange samples or pull from the next rack."
+        )
+
+        pb_col1, pb_col2 = st.columns([3, 1])
+        with pb_col1:
+            pb_prefix = st.text_input(
+                "Donation prefix", value="F26-", key="pb_prefix_input", max_chars=20
+            ).strip()
+        with pb_col2:
+            st.write("")  # spacer to align button with input
+            build_racks_btn = st.button("Build Racks", key="btn_build_racks")
+
+        if build_racks_btn:
+            try:
+                cleaned_us_pb = clean_unit_status(us_df)
+                all_pb_ids = (
+                    cleaned_us_pb.get("Donation #", pd.Series(dtype=str))
+                    .dropna().astype(str).str.strip()
+                )
+
+                def _pb_num(x: str) -> int:
+                    m = re.match(rf"^{re.escape(pb_prefix)}(\d+)$", x, re.IGNORECASE)
+                    return int(m.group(1)) if m else int(1e18)
+
+                # Apply the same removal filter used by the range-based rack
+                # so that SO, rejected and no-bleed IDs are excluded.
+                try:
+                    to_remove_pb, _ = process_unit_status_all(cleaned_us_pb, pb_prefix)
+                except ValueError:
+                    to_remove_pb = set()
+                filtered_pb_ids: List[str] = sorted(
+                    [
+                        iid for iid in all_pb_ids
+                        if iid.upper().startswith(pb_prefix.upper())
+                        and iid not in to_remove_pb
+                    ],
+                    key=_pb_num,
+                )
+                # Group into racks of 216; pad the last rack with empty strings
+                pb_racks: Dict[int, List[str]] = {}
+                total_ids_pb = max(1, len(filtered_pb_ids))
+                for i, chunk_start in enumerate(range(0, total_ids_pb, 216)):
+                    chunk = filtered_pb_ids[chunk_start: chunk_start + 216]
+                    pb_racks[i] = chunk + [""] * (216 - len(chunk))
+                # Build reverse lookup: sample ID → rack index
+                pb_id_to_rack: Dict[str, int] = {
+                    sid: ridx
+                    for ridx, rids in pb_racks.items()
+                    for sid in rids if sid
+                }
+                st.session_state["pb_racks"] = pb_racks
+                st.session_state["pb_id_to_rack"] = pb_id_to_rack
+                st.session_state["pb_current_rack"] = 0
+                st.session_state["pb_prefix"] = pb_prefix
+                # Build date map: sample ID → datetime.date (from Donation Date column)
+                _pb_date_map: Dict[str, datetime.date] = {}
+                if (
+                    "Donation Date" in cleaned_us_pb.columns
+                    and "Donation #" in cleaned_us_pb.columns
+                ):
+                    for _, _dr in cleaned_us_pb.iterrows():
+                        _sid = str(_dr.get("Donation #", "")).strip()
+                        _d = _parse_donation_date(_dr.get("Donation Date"))
+                        if _sid and _d is not None:
+                            _pb_date_map[_sid] = _d
+                st.session_state["pb_date_map"] = _pb_date_map
+                total_filled_pb = sum(1 for rids in pb_racks.values() for s in rids if s)
+                st.success(f"Built {len(pb_racks)} rack(s) with {total_filled_pb} samples.")
+            except Exception as e:
+                st.error(f"Failed to build racks: {e}")
+
+        if "pb_racks" in st.session_state:
+            pb_racks = st.session_state["pb_racks"]
+            current_pb_idx = st.session_state.get("pb_current_rack", 0)
+
+            # Search box
+            pb_search = st.text_input(
+                "Search by unit ID to jump to its rack",
+                key="pb_search",
+                placeholder="e.g. 002035 or F26-002035",
+            ).strip()
+            if pb_search:
+                pb_prefix_val = st.session_state.get("pb_prefix", "F26-")
+                if pb_search.upper().startswith(pb_prefix_val.upper()):
+                    search_full_pb = pb_search
+                elif pb_search.isdigit():
+                    search_full_pb = f"{pb_prefix_val}{pb_search.zfill(6)}"
+                else:
+                    search_full_pb = pb_search
+                found_rack_idx = st.session_state["pb_id_to_rack"].get(search_full_pb)
+                if found_rack_idx is not None:
+                    st.session_state["pb_current_rack"] = found_rack_idx
+                    current_pb_idx = found_rack_idx
+                    st.success(f"{search_full_pb} → Rack {found_rack_idx + 1}")
+                else:
+                    st.warning(f"{search_full_pb} not found in any pre-built rack.")
+
+            # Navigation row — avoid st.rerun() so toggle states survive navigation
+            nav_c1, nav_c2, nav_c3 = st.columns([1, 5, 1])
+            with nav_c1:
+                prev_clicked = st.button(
+                    "◀ Prev", key="pb_prev", disabled=(current_pb_idx == 0)
+                )
+            with nav_c2:
+                _nav_info = st.empty()
+            with nav_c3:
+                next_clicked = st.button(
+                    "Next ▶", key="pb_next",
+                    disabled=(current_pb_idx >= len(pb_racks) - 1),
+                )
+
+            # Update index in-place; subsequent code uses the updated value
+            if prev_clicked and current_pb_idx > 0:
+                current_pb_idx -= 1
+                st.session_state["pb_current_rack"] = current_pb_idx
+            elif next_clicked and current_pb_idx < len(pb_racks) - 1:
+                current_pb_idx += 1
+                st.session_state["pb_current_rack"] = current_pb_idx
+
+            filled_count = sum(1 for s in pb_racks[current_pb_idx] if s)
+            _nav_info.markdown(
+                f"**Rack {current_pb_idx + 1} of {len(pb_racks)}** "
+                f"— {filled_count} / 216 positions filled"
+            )
+
+            rack_ids_current = list(pb_racks[current_pb_idx])
+
+            # Compute date range string for rack legend
+            _date_map_pb = st.session_state.get("pb_date_map", {})
+            _pb_date_range_str: Optional[str] = None
+            if _date_map_pb:
+                _rack_dates = [
+                    _date_map_pb[sid]
+                    for sid in rack_ids_current
+                    if sid and sid in _date_map_pb
+                ]
+                if _rack_dates:
+                    _dmin = min(_rack_dates)
+                    _dmax = max(_rack_dates)
+                    _pb_date_range_str = (
+                        _dmin.strftime("%d.%m.%Y")
+                        if _dmin == _dmax
+                        else f"{_dmin.strftime('%d.%m.%Y')} – {_dmax.strftime('%d.%m.%Y')}"
+                    )
+
+            # Edit mode toggle
+            pb_edit_mode = st.checkbox("Edit positions", key="pb_edit_mode", value=False)
+
+            if pb_edit_mode:
+                st.caption(
+                    "Edit Sample IDs directly in the table. Clear a cell to leave "
+                    "that position empty. Use **Apply Changes** to save edits, or "
+                    "**Re-pack from next rack** to pull samples forward and fill gaps."
+                )
+                edit_df_pb = pd.DataFrame({
+                    "Position": list(range(1, 217)),
+                    "Sample ID": rack_ids_current,
+                })
+                edited_df_pb = st.data_editor(
+                    edit_df_pb,
+                    use_container_width=True,
+                    hide_index=True,
+                    key=f"pb_editor_{current_pb_idx}",
+                    column_config={
+                        "Position": st.column_config.NumberColumn(
+                            "Pos", disabled=True, width="small"
+                        ),
+                        "Sample ID": st.column_config.TextColumn(
+                            "Sample ID", width="medium"
+                        ),
+                    },
+                    num_rows="fixed",
+                )
+
+                btn_c1, btn_c2 = st.columns(2)
+                with btn_c1:
+                    if st.button("Apply Changes", key="pb_apply"):
+                        new_ids_pb = [
+                            str(v).strip() if pd.notna(v) and str(v).strip() else ""
+                            for v in edited_df_pb["Sample ID"]
+                        ]
+                        new_ids_pb = (new_ids_pb + [""] * 216)[:216]
+                        st.session_state["pb_racks"][current_pb_idx] = new_ids_pb
+                        st.session_state["pb_id_to_rack"] = {
+                            sid: ridx
+                            for ridx, rids in st.session_state["pb_racks"].items()
+                            for sid in rids if sid
+                        }
+                        st.success("Changes saved.")
+                        st.rerun()
+                with btn_c2:
+                    has_next_rack = current_pb_idx + 1 < len(pb_racks)
+                    if st.button(
+                        "Re-pack from next rack", key="pb_repack",
+                        disabled=not has_next_rack
+                    ):
+                        cur_ids_edit = [
+                            str(v).strip() if pd.notna(v) and str(v).strip() else ""
+                            for v in edited_df_pb["Sample ID"]
+                        ]
+                        nxt_ids_edit = list(pb_racks[current_pb_idx + 1])
+                        combined_pb = (
+                            [s for s in cur_ids_edit if s]
+                            + [s for s in nxt_ids_edit if s]
+                        )
+                        st.session_state["pb_racks"][current_pb_idx] = (
+                            combined_pb[:216] + [""] * max(0, 216 - len(combined_pb))
+                        )[:216]
+                        st.session_state["pb_racks"][current_pb_idx + 1] = (
+                            combined_pb[216:] + [""] * max(0, 216 - len(combined_pb[216:]))
+                        )[:216]
+                        st.session_state["pb_id_to_rack"] = {
+                            sid: ridx
+                            for ridx, rids in st.session_state["pb_racks"].items()
+                            for sid in rids if sid
+                        }
+                        st.success("Re-packed successfully.")
+                        st.rerun()
+
+                # Trim rack size — limit this rack to N samples, overflow → next rack
+                st.markdown("---")
+                st.markdown("**Set rack size**")
+                st.caption(
+                    "Limit this rack to a specific number of samples. "
+                    "Any samples beyond that count are moved to the start of the next rack."
+                )
+                _cur_filled = sum(
+                    1 for v in edited_df_pb["Sample ID"]
+                    if pd.notna(v) and str(v).strip()
+                )
+                trim_c1, trim_c2 = st.columns([3, 1])
+                with trim_c1:
+                    trim_size = st.number_input(
+                        "Max samples in this rack",
+                        min_value=1,
+                        max_value=216,
+                        value=min(_cur_filled, 216),
+                        step=1,
+                        key="pb_trim_size",
+                    )
+                with trim_c2:
+                    st.write("")
+                    _has_next_for_trim = current_pb_idx + 1 < len(pb_racks)
+                    apply_trim = st.button(
+                        "Apply trim",
+                        key="pb_apply_trim",
+                        disabled=not _has_next_for_trim,
+                        help="Requires a next rack to receive the overflow samples.",
+                    )
+                if apply_trim:
+                    cur_ids_trim = [
+                        str(v).strip() if pd.notna(v) and str(v).strip() else ""
+                        for v in edited_df_pb["Sample ID"]
+                    ]
+                    filled_trim = [s for s in cur_ids_trim if s]
+                    kept_trim = filled_trim[:trim_size]
+                    overflow_trim = filled_trim[trim_size:]
+                    st.session_state["pb_racks"][current_pb_idx] = (
+                        kept_trim + [""] * (216 - len(kept_trim))
+                    )[:216]
+                    if overflow_trim:
+                        nxt_trim = list(st.session_state["pb_racks"][current_pb_idx + 1])
+                        nxt_filled_trim = [s for s in nxt_trim if s]
+                        merged_trim = overflow_trim + nxt_filled_trim
+                        st.session_state["pb_racks"][current_pb_idx + 1] = (
+                            merged_trim + [""] * max(0, 216 - len(merged_trim))
+                        )[:216]
+                    st.session_state["pb_id_to_rack"] = {
+                        sid: ridx
+                        for ridx, rids in st.session_state["pb_racks"].items()
+                        for sid in rids if sid
+                    }
+                    st.success(
+                        f"Rack trimmed to {len(kept_trim)} samples. "
+                        f"{len(overflow_trim)} sample(s) moved to Rack {current_pb_idx + 2}."
+                    )
+                    st.rerun()
+
+                # Visualization uses the live editor state
+                display_ids_pb = [
+                    str(v).strip() if pd.notna(v) and str(v).strip() else ""
+                    for v in edited_df_pb["Sample ID"]
+                ]
+            else:
+                display_ids_pb = rack_ids_current
+
+            # Build visualization (reuse pallet/packed info from shipment file if loaded)
+            not_manifest_set_pb = set(st.session_state.get("not_in_manifest", []))
+            pallet_map_pb = build_pallet_map(gs_df) if gs_df is not None else {}
+            packed_set_pb: Set[str] = set()
+            if gs_df is not None and "Samples Packed?" in gs_df.columns and "Sample ID" in gs_df.columns:
+                _pbpm = gs_df["Samples Packed?"].fillna("").astype(str).str.strip().ne("")
+                packed_set_pb = set(
+                    gs_df.loc[_pbpm, "Sample ID"].dropna().astype(str).str.strip()
+                )
+
+            # Hide/strikethrough toggles (mirrors the range-based rack controls)
+            pb_hide_packed = st.toggle(
+                "Hide packed samples", value=False, key="pb_hide_packed"
+            )
+            if pb_hide_packed:
+                display_ids_pb = [
+                    "" if sid in packed_set_pb else sid for sid in display_ids_pb
+                ]
+                packed_set_pb_display: Set[str] = set()
+            else:
+                pb_show_strikethrough = st.toggle(
+                    "Show strikethrough on packed samples",
+                    value=True,
+                    key="pb_show_strikethrough",
+                )
+                packed_set_pb_display = packed_set_pb if pb_show_strikethrough else set()
+
+            rack_html_pb = build_rack_html(
+                display_ids_pb,
+                not_manifest_set_pb,
+                pallet_map=pallet_map_pb,
+                packed_set=packed_set_pb_display,
+                digits_to_show=3,
+                fill_value="–",
+                title=f"Rack {current_pb_idx + 1} of {len(pb_racks)} (Pre-built)",
+                date_range_str=_pb_date_range_str,
+            )
+            st.markdown(rack_html_pb, unsafe_allow_html=True)
 
 
 if __name__ == "__main__":

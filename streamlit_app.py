@@ -46,6 +46,7 @@ control number(s) for the unit status analysis.
 """
 
 import datetime
+import io
 import re
 from typing import Dict, List, Tuple, Optional, Set
 
@@ -765,6 +766,247 @@ def build_rack_html(
 """
     return html
 
+
+
+def build_vi_label_groups(
+    us_df: pd.DataFrame,
+    prefix: str,
+    start_id: str,
+    group_size: int = 12,
+) -> List[Dict]:
+    """Group donation IDs into batches for Visual Inspection labels.
+
+    Each complete group contains exactly ``group_size`` Quarantine units.
+    Rejected and SO units encountered within the sequential range are
+    included in the group (they appear in the date/ID span) but do **not**
+    count toward ``group_size``.  No-bleed gaps are absent from the data and
+    therefore never appear in any group.
+
+    Parameters
+    ----------
+    us_df : pd.DataFrame
+        Raw (uncleaned) unit status DataFrame.
+    prefix : str
+        Donation ID prefix, e.g. ``"F26-"``.
+    start_id : str
+        The first Donation # to include.  Must exist in the data.
+    group_size : int
+        Number of Quarantine units per complete label group (default 12).
+
+    Returns
+    -------
+    list of dict
+        Each dict has keys: ``rows``, ``first_id``, ``last_id``,
+        ``date_min``, ``date_max``, ``is_complete``, ``valid_count``.
+    """
+    required = {"Donation #", "Status"}
+    missing = required - set(us_df.columns)
+    if missing:
+        raise ValueError(f"Missing required columns: {missing}")
+
+    df = us_df.copy()
+    donation_col = df["Donation #"].fillna("").astype(str).str.strip()
+
+    def _extract_num(x: str) -> float:
+        m = re.match(rf"^{re.escape(prefix)}(\d+)$", x, re.IGNORECASE)
+        return float(m.group(1)) if m else float("inf")
+
+    prefix_mask = donation_col.str.upper().str.startswith(prefix.upper())
+    df = df.loc[prefix_mask].copy()
+    df["_dn"] = donation_col.loc[prefix_mask].map(_extract_num)
+    df = df.sort_values("_dn").reset_index(drop=True)
+
+    if df.empty:
+        return []
+
+    # Find start position
+    start_norm = start_id.strip()
+    positions = df.index[df["Donation #"].astype(str).str.strip() == start_norm].tolist()
+    if not positions:
+        raise ValueError(f"Start ID '{start_id}' not found for prefix '{prefix}'")
+    start_pos = positions[0]
+
+    date_col = "Donation Date"
+    has_dates = date_col in df.columns
+
+    groups: List[Dict] = []
+    cur_rows: List[Dict] = []
+    valid_count = 0
+
+    for idx in range(start_pos, len(df)):
+        row = df.iloc[idx].to_dict()
+        status = str(row.get("Status", "")).strip().lower()
+        is_valid = status == "quarantine"
+        cur_rows.append(row)
+        if is_valid:
+            valid_count += 1
+        if valid_count == group_size:
+            dates = [
+                _parse_donation_date(r.get(date_col))
+                for r in cur_rows
+                if has_dates
+            ]
+            dates = [d for d in dates if d is not None]
+            groups.append({
+                "rows": cur_rows,
+                "first_id": str(cur_rows[0]["Donation #"]).strip(),
+                "last_id": str(cur_rows[-1]["Donation #"]).strip(),
+                "date_min": min(dates) if dates else None,
+                "date_max": max(dates) if dates else None,
+                "is_complete": True,
+                "valid_count": valid_count,
+            })
+            cur_rows = []
+            valid_count = 0
+
+    # Trailing partial group (fewer than group_size valid units)
+    if cur_rows:
+        dates = [
+            _parse_donation_date(r.get(date_col))
+            for r in cur_rows
+            if has_dates
+        ]
+        dates = [d for d in dates if d is not None]
+        groups.append({
+            "rows": cur_rows,
+            "first_id": str(cur_rows[0]["Donation #"]).strip(),
+            "last_id": str(cur_rows[-1]["Donation #"]).strip(),
+            "date_min": min(dates) if dates else None,
+            "date_max": max(dates) if dates else None,
+            "is_complete": False,
+            "valid_count": valid_count,
+        })
+
+    return groups
+
+
+def generate_vi_labels_pdf(
+    groups: List[Dict],
+    tomorrow: datetime.date,
+) -> bytes:
+    """Render Visual Inspection label groups to a PDF.
+
+    Each A4 page contains **two identical copies** of the same group label
+    (top half and bottom half), so one sheet can be cut in two and one copy
+    kept with the unit and one with the paperwork.
+
+    * **Complete group** label: ``DD.MM.YYYY – DD.MM.YYYY`` date range and
+      ``FIRST_ID – LAST_ID`` ID range.
+    * **Last partial group** label: ``LATEST_DATE – TOMORROW`` date range
+      and ``FIRST_ID –`` (end ID omitted because the group is open-ended).
+
+    Parameters
+    ----------
+    groups : list of dict
+        As returned by :func:`build_vi_label_groups`.
+    tomorrow : datetime.date
+        End date used for the last partial group label.
+
+    Returns
+    -------
+    bytes
+        Raw PDF content suitable for ``st.download_button``.
+    """
+    try:
+        from reportlab.pdfgen import canvas as rl_canvas
+        from reportlab.lib.pagesizes import A4
+        from reportlab.lib.units import mm
+        from reportlab.pdfbase.pdfmetrics import stringWidth
+    except ImportError as exc:
+        raise ImportError(
+            "reportlab is required to generate PDFs. "
+            "Install it with:  pip install reportlab"
+        ) from exc
+
+    buf = io.BytesIO()
+    page_w, page_h = A4          # ~595 × 842 pt
+    margin_x = 12 * mm
+    margin_y = 14 * mm
+    gap = 8 * mm
+
+    label_w = page_w - 2 * margin_x
+    label_h = (page_h - 2 * margin_y - gap) / 2
+
+    c = rl_canvas.Canvas(buf, pagesize=A4)
+
+    def _fit_size(text: str, font: str, max_w: float, start: int = 60) -> int:
+        sz = start
+        while sz > 8:
+            if stringWidth(text, font, sz) <= max_w:
+                return sz
+            sz -= 1
+        return sz
+
+    def _draw_label(
+        x: float, y: float, date_str: str,
+        id_left: str, id_right: Optional[str] = None,
+    ) -> None:
+        inner_w = label_w - 10 * mm
+        cx = x + label_w / 2
+
+        # Border
+        c.setStrokeColorRGB(0.55, 0.55, 0.55)
+        c.setLineWidth(0.8)
+        c.rect(x, y, label_w, label_h)
+
+        # Date range (large bold, upper portion)
+        date_sz = _fit_size(date_str, "Helvetica-Bold", inner_w, start=60)
+        c.setFont("Helvetica-Bold", date_sz)
+        c.setFillColorRGB(0, 0, 0)
+        c.drawCentredString(cx, y + label_h * 0.56, date_str)
+
+        # ID range – draw left ID, dash, and right ID as separate pieces so
+        # we can add a generous gap on each side of the dash.
+        sizing_str = (
+            f"{id_left}    -    {id_right}" if id_right else f"{id_left}   -"
+        )
+        id_sz = _fit_size(sizing_str, "Helvetica", inner_w, start=28)
+        c.setFont("Helvetica", id_sz)
+
+        gap_w = stringWidth("    ", "Helvetica", id_sz)   # 4-space gap per side
+        dash_w = stringWidth("-", "Helvetica", id_sz)
+        left_w = stringWidth(id_left, "Helvetica", id_sz)
+        right_w = stringWidth(id_right, "Helvetica", id_sz) if id_right else 0
+
+        total_w = left_w + gap_w + dash_w + (gap_w + right_w if id_right else 0)
+        sx = cx - total_w / 2
+        base_y = y + label_h * 0.28
+
+        c.drawString(sx, base_y, id_left)
+        c.drawString(sx + left_w + gap_w, base_y, "-")
+        if id_right:
+            c.drawString(sx + left_w + gap_w + dash_w + gap_w, base_y, id_right)
+
+    def _label_parts(group: Dict):
+        """Return (date_str, id_left, id_right) for a group."""
+        if group["is_complete"]:
+            d_min, d_max = group["date_min"], group["date_max"]
+            date_str = (
+                f"{d_min.strftime('%d.%m.%Y')} - {d_max.strftime('%d.%m.%Y')}"
+                if d_min and d_max
+                else (d_min or d_max).strftime("%d.%m.%Y") if (d_min or d_max) else "Date unknown"
+            )
+            return date_str, group["first_id"], group["last_id"]
+        else:
+            d_max = group["date_max"]
+            date_str = (
+                f"{d_max.strftime('%d.%m.%Y')} - {tomorrow.strftime('%d.%m.%Y')}"
+                if d_max else f"? - {tomorrow.strftime('%d.%m.%Y')}"
+            )
+            return date_str, group["first_id"], None
+
+    # Two different groups per page (top = even index, bottom = odd index)
+    for i in range(0, len(groups), 2):
+        top_ds, top_il, top_ir = _label_parts(groups[i])
+        _draw_label(margin_x, margin_y + gap + label_h, top_ds, top_il, top_ir)
+        if i + 1 < len(groups):
+            bot_ds, bot_il, bot_ir = _label_parts(groups[i + 1])
+            _draw_label(margin_x, margin_y, bot_ds, bot_il, bot_ir)
+        c.showPage()
+
+    c.save()
+    buf.seek(0)
+    return buf.read()
 
 
 def main() -> None:
@@ -1505,6 +1747,111 @@ def main() -> None:
                 date_range_str=_pb_date_range_str,
             )
             st.markdown(rack_html_pb, unsafe_allow_html=True)
+
+        # ------------------------------------------------------------------
+        # Visual Inspection Labels
+        st.markdown("---")
+        st.subheader("Visual Inspection Labels")
+        st.write(
+            "Groups Quarantine units into batches of N and generates a printable "
+            "PDF.  Each page has two different labels (top and bottom half). "
+            "Rejected and SO units are included in the printed range but do **not** "
+            "count toward the group size."
+        )
+
+        vi_c1, vi_c2, vi_c3 = st.columns([2, 3, 1])
+        with vi_c1:
+            vi_prefix = st.text_input(
+                "Donation prefix", value="F26-", key="vi_prefix", max_chars=20
+            ).strip()
+        with vi_c3:
+            vi_group_size = st.number_input(
+                "Group size", min_value=1, max_value=216, value=12, step=1,
+                key="vi_group_size",
+            )
+
+        # Compute default start ID: first Quarantine unit from the latest date
+        _vi_default_start = ""
+        try:
+            _vi_dn = us_df.get("Donation #", pd.Series(dtype=str)).fillna("").astype(str).str.strip()
+            _vi_pm = _vi_dn.str.upper().str.startswith(vi_prefix.upper())
+            _vi_qs = us_df.get("Status", pd.Series(dtype=str)).fillna("").astype(str).str.strip().str.lower() == "quarantine"
+            _vi_filt = us_df.loc[_vi_pm & _vi_qs].copy()
+            if "Donation Date" in _vi_filt.columns and not _vi_filt.empty:
+                _vi_filt["_pd"] = _vi_filt["Donation Date"].map(_parse_donation_date)
+                _vi_max_d = _vi_filt["_pd"].dropna().max()
+                if _vi_max_d is not None:
+                    _vi_on_max = _vi_filt[_vi_filt["_pd"] == _vi_max_d]
+                    def _vi_sort_num(x):
+                        m = re.match(rf"^{re.escape(vi_prefix)}(\d+)$", str(x), re.IGNORECASE)
+                        return int(m.group(1)) if m else int(1e18)
+                    _vi_sorted = _vi_on_max.sort_values(
+                        by="Donation #", key=lambda col: col.map(_vi_sort_num)
+                    )
+                    if not _vi_sorted.empty:
+                        _vi_default_start = str(_vi_sorted.iloc[0]["Donation #"]).strip()
+        except Exception:
+            pass
+
+        with vi_c2:
+            vi_start_id = st.text_input(
+                "Start from donation ID",
+                value=_vi_default_start,
+                key="vi_start_id",
+                placeholder="e.g. F26-012401",
+            ).strip()
+
+        if st.button("Generate Visual Inspection Labels PDF", key="btn_vi_labels"):
+            if not vi_start_id:
+                st.error("Please enter a start donation ID.")
+            else:
+                try:
+                    vi_groups = build_vi_label_groups(
+                        us_df, vi_prefix, vi_start_id, group_size=int(vi_group_size)
+                    )
+                    if not vi_groups:
+                        st.warning("No groups found from the specified start ID.")
+                    else:
+                        _tomorrow = datetime.date.today() + datetime.timedelta(days=1)
+                        vi_pdf = generate_vi_labels_pdf(vi_groups, tomorrow=_tomorrow)
+                        st.success(f"Generated {len(vi_groups)} label(s).")
+                        st.download_button(
+                            label=f"⬇ Download PDF ({len(vi_groups)} label pages)",
+                            data=vi_pdf,
+                            file_name="vi_labels.pdf",
+                            mime="application/pdf",
+                            key="vi_pdf_dl",
+                        )
+                        # Preview table
+                        _prev = []
+                        for _g in vi_groups:
+                            _dm, _dx = _g["date_min"], _g["date_max"]
+                            if _g["is_complete"]:
+                                _dr = (
+                                    f"{_dm.strftime('%d.%m.%Y')} – {_dx.strftime('%d.%m.%Y')}"
+                                    if _dm and _dx else "—"
+                                )
+                                _ir = f"{_g['first_id']} – {_g['last_id']}"
+                            else:
+                                _dr = (
+                                    f"{_dx.strftime('%d.%m.%Y')} – {_tomorrow.strftime('%d.%m.%Y')}"
+                                    if _dx else f"? – {_tomorrow.strftime('%d.%m.%Y')}"
+                                )
+                                _ir = f"{_g['first_id']} –"
+                            _prev.append({
+                                "Date range": _dr,
+                                "ID range": _ir,
+                                "Quarantine": _g["valid_count"],
+                                "Total rows": len(_g["rows"]),
+                                "Complete": "✓" if _g["is_complete"] else "(partial)",
+                            })
+                        st.table(pd.DataFrame(_prev))
+                except ImportError as _e:
+                    st.error(str(_e))
+                except ValueError as _e:
+                    st.error(str(_e))
+                except Exception as _e:
+                    st.exception(_e)
 
 
 if __name__ == "__main__":

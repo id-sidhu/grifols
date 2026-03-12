@@ -394,7 +394,24 @@ def process_unit_status_all(us_df: pd.DataFrame, prefix: str) -> Set[str]:
 
     df = us_df.copy()
 
-    # Remove rows with missing/blank Donor Status
+    # Compute no-bleed gaps from ALL rows matching the prefix (before any
+    # filtering) so that samples with blank Donor Status do not create
+    # false gaps.
+    _all_donation_nums = (
+        df["Donation #"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .str.extract(rf"^{re.escape(prefix)}(\d+)$")[0]
+        .astype(float)
+    )
+    _all_nums = _all_donation_nums.dropna().astype(int).sort_values()
+    missing_nums: List[int] = []
+    if not _all_nums.empty:
+        missing_nums = sorted(set(range(_all_nums.min(), _all_nums.max() + 1)) - set(_all_nums))
+    no_bleeds = {f"{prefix}{n:06d}" for n in missing_nums}
+
+    # Remove rows with missing/blank Donor Status for classification
     donor_status = df["Donor Status"].astype(str)
     df = df[donor_status.notna() & (donor_status.str.strip() != "")].copy()
 
@@ -408,19 +425,14 @@ def process_unit_status_all(us_df: pd.DataFrame, prefix: str) -> Set[str]:
         .astype(float)
     )
 
-    nums = df["donation_num"].dropna().astype(int).sort_values()
-    missing_nums: List[int] = []
-    if not nums.empty:
-        missing_nums = sorted(set(range(nums.min(), nums.max() + 1)) - set(nums))
-    no_bleeds = {f"{prefix}{n:06d}" for n in missing_nums}
-
     # Normalize status
     status_raw = df["Status"].fillna("").astype(str).str.strip()
 
     def normalize_status(s: str) -> str:
-        if s == "Quarantine":
+        s_lower = s.strip().lower()
+        if s_lower == "quarantine":
             return "Quarantine"
-        if s == "SO (16 week)":
+        if s_lower.startswith("so"):
             return "SO (16 week)"
         return "Rejected"
 
@@ -451,10 +463,10 @@ def process_unit_status_all(us_df: pd.DataFrame, prefix: str) -> Set[str]:
         # Track these kept IDs so callers can highlight them separately
         samples_collected_rejected = set(
             df.loc[(df["Type"] == "rejected") & samples_were_collected, "Donation #"]
-            .dropna().astype(str).tolist()
+            .dropna().astype(str).str.strip().tolist()
         )
-    rejected = set(df.loc[rejected_mask, "Donation #"].dropna().astype(str).tolist())
-    sample_only = set(df.loc[df["Type"] == "sample_only", "Donation #"].dropna().astype(str).tolist())
+    rejected = set(df.loc[rejected_mask, "Donation #"].dropna().astype(str).str.strip().tolist())
+    sample_only = set(df.loc[df["Type"] == "sample_only", "Donation #"].dropna().astype(str).str.strip().tolist())
 
     return set().union(no_bleeds, rejected, sample_only), samples_collected_rejected
 
@@ -1026,33 +1038,44 @@ def main() -> None:
         "you can also analyse donations on a specific prefix and control number(s)."
     )
 
-    # File uploader for the shipment CSV.  This is required for the pallet report.
+    # File uploader for the shipment file.  This is required for the pallet report.
     shipment_file = st.file_uploader(
-        label="Upload grifols_shipment.csv", type=["csv"], key="shipment"
+        label="Upload Grifols shipment file", type=["csv", "xlsx", "xls"], key="shipment"
     )
-    # File uploader for the unit status CSV.  This is optional and can be
+    # File uploader for the unit status file.  This is optional and can be
     # used to demonstrate the cleaning helper and the unit status analysis.
     unit_status_file = st.file_uploader(
-        label="Upload unit_status.csv (optional)", type=["csv"], key="unit_status"
+        label="Upload unit status file (optional)", type=["csv", "xlsx", "xls"], key="unit_status"
     )
 
-    # Load the DataFrames only once per session
-    if shipment_file:
+    def _read_upload(uploaded_file, dtype=None) -> Optional[pd.DataFrame]:
+        """Read an uploaded file as a DataFrame, supporting CSV and Excel."""
+        if uploaded_file is None:
+            return None
+        name = uploaded_file.name.lower()
         try:
-            gs_df = pd.read_csv(shipment_file)
+            if name.endswith((".xlsx", ".xls")):
+                kwargs = {"dtype": dtype} if dtype else {}
+                return pd.read_excel(uploaded_file, **kwargs)
+            else:
+                kwargs = {"dtype": dtype} if dtype else {}
+                return pd.read_csv(uploaded_file, **kwargs)
         except Exception as e:
-            st.error(f"Failed to read shipment CSV: {e}")
-            gs_df = None
-    else:
-        gs_df = None
-    if unit_status_file:
-        try:
-            us_df = pd.read_csv(unit_status_file, dtype=str)
-        except Exception as e:
-            st.error(f"Failed to read unit status CSV: {e}")
-            us_df = None
-    else:
-        us_df = None
+            st.error(f"Failed to read {uploaded_file.name}: {e}")
+            return None
+
+    # Load the DataFrames
+    gs_df = _read_upload(shipment_file)
+    us_df = _read_upload(unit_status_file, dtype=str)
+
+    # Normalize whitespace in key ID columns right after loading so all
+    # downstream comparisons are consistent.
+    if gs_df is not None and "Sample ID" in gs_df.columns:
+        gs_df["Sample ID"] = gs_df["Sample ID"].astype(str).str.strip()
+        gs_df.loc[gs_df["Sample ID"] == "nan", "Sample ID"] = np.nan
+    if us_df is not None and "Donation #" in us_df.columns:
+        us_df["Donation #"] = us_df["Donation #"].astype(str).str.strip()
+        us_df.loc[us_df["Donation #"] == "nan", "Donation #"] = np.nan
 
     # Compute and store a not_in_manifest set if both DataFrames are present
     if gs_df is not None and us_df is not None:

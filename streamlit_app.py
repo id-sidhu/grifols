@@ -24,7 +24,7 @@ functionality:
     donation IDs classified as "to be removed" (e.g. rejected or
     sample‑only) are excluded when presenting results to the user.
 
-2.  In the unit status check section, the user may provide **two** control
+2.  In the Manual racks/Unit Status Check section, the user may provide **two** control
     numbers separated by a comma.  When this occurs, instead of checking
     a single ID against the "to be removed" set, the app will display
     all IDs from the ``not_in_manifest`` set whose numeric portion falls
@@ -1093,16 +1093,32 @@ def main() -> None:
     else:
         st.session_state["not_in_manifest"] = []
 
-    # Sidebar for pallet report input controls
+    # Sidebar: navigation + section-specific controls
     with st.sidebar:
-        st.header("Pallet Report Inputs")
-        pallet_no = st.number_input(
-            "Pallet number", min_value=1, step=1, value=1, format="%d"
+        st.header("Navigation")
+        nav_section = st.radio(
+            "Go to section",
+            [
+                "Pallet Report",
+                "Manual racks/Unit Status Check",
+                "Pre-built Rack Browser",
+                "Visual Inspection Labels",
+            ],
+            key="nav_section",
         )
-        verbose = st.checkbox("Show full F25/F26 lists", value=False)
+        st.markdown("---")
+        if nav_section == "Pallet Report":
+            st.header("Pallet Report Inputs")
+            pallet_no = st.number_input(
+                "Pallet number", min_value=1, step=1, value=1, format="%d"
+            )
+            verbose = st.checkbox("Show full F25/F26 lists", value=False)
+        else:
+            pallet_no = st.session_state.get("pallet_no_last", 1)
+            verbose = False
 
     # Display shipment DataFrame preview and generate pallet report
-    if gs_df is not None:
+    if nav_section == "Pallet Report" and gs_df is not None:
         st.subheader("Shipment Data Preview")
         st.write(
             "Below is a preview of the shipment DataFrame (first 5 rows). "
@@ -1207,13 +1223,12 @@ def main() -> None:
                         st.dataframe(f26_df)
                     else:
                         st.write("No F26 IDs found.")
-    else:
-        st.info("Please upload a grifols_shipment.csv file to begin the pallet report.")
+    elif nav_section == "Pallet Report":
+        st.info("Please upload a Grifols shipment file to begin the pallet report.")
 
     # If unit status CSV is loaded, provide inputs and allow control number checks
-    if us_df is not None:
-        st.markdown("---")
-        st.subheader("Unit Status Check")
+    if nav_section == "Manual racks/Unit Status Check" and us_df is not None:
+        st.subheader("Manual racks/Unit Status Check")
 
         prefix_input = st.text_input(
             "Donation prefix", value="F26-", max_chars=20
@@ -1393,9 +1408,7 @@ def main() -> None:
             )
             st.markdown(_rack_html, unsafe_allow_html=True)
 
-        # ------------------------------------------------------------------
-        # Pre-built Rack Browser
-        st.markdown("---")
+    if nav_section == "Pre-built Rack Browser" and us_df is not None:
         st.subheader("Pre-built Rack Browser")
         st.write(
             "Automatically builds sequential racks of 216 samples from the unit "
@@ -1771,9 +1784,7 @@ def main() -> None:
             )
             st.markdown(rack_html_pb, unsafe_allow_html=True)
 
-        # ------------------------------------------------------------------
-        # Visual Inspection Labels
-        st.markdown("---")
+    if nav_section == "Visual Inspection Labels" and us_df is not None:
         st.subheader("Visual Inspection Labels")
         st.write(
             "Groups Quarantine units into batches of N and generates a printable "
@@ -1875,6 +1886,9 @@ def main() -> None:
                     st.error(str(_e))
                 except Exception as _e:
                     st.exception(_e)
+
+    if nav_section in ["Manual racks/Unit Status Check", "Pre-built Rack Browser", "Visual Inspection Labels"] and us_df is None:
+        st.info("Please upload a unit status file to use this section.")
 
 
 if __name__ == "__main__":

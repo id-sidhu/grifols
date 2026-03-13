@@ -2022,7 +2022,7 @@ def main() -> None:
             with _info_col:
                 st.info(
                     f"Auto-detected start: **{_vi_auto_start}** "
-                    f"— continuing from last print on {_last_updated}"
+                    f"— last complete group covered donations up to {_last_updated}"
                 )
             with _reset_col:
                 st.write("")
@@ -2078,10 +2078,15 @@ def main() -> None:
                             _vi_state = st.session_state.get("vi_gist_state", {})
                             _vi_ps = _vi_state.get(vi_prefix, {})
                             _vi_salt = _vi_ps.get("salt") or _secrets_mod.token_hex(16)
+                            _vi_lc_date = _vi_last_complete.get("date_max")
                             _vi_state[vi_prefix] = {
                                 "salt": _vi_salt,
                                 "last_complete_hash": _vi_hash_id(_vi_salt, _vi_last_complete["last_id"]),
-                                "last_updated": datetime.date.today().isoformat(),
+                                "last_updated": (
+                                    _vi_lc_date.strftime("%d.%m.%Y")
+                                    if _vi_lc_date
+                                    else datetime.date.today().strftime("%d.%m.%Y")
+                                ),
                             }
                             _saved_ok = _vi_gist_save(_vi_state)
                             st.session_state["vi_gist_state"] = _vi_state

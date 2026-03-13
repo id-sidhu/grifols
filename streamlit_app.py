@@ -46,8 +46,11 @@ control number(s) for the unit status analysis.
 """
 
 import datetime
+import hashlib
 import io
+import json
 import re
+import secrets as _secrets_mod
 from typing import Dict, List, Tuple, Optional, Set
 
 import numpy as np
@@ -952,6 +955,7 @@ def generate_vi_labels_pdf(
     def _draw_label(
         x: float, y: float, date_str: str,
         id_left: str, id_right: Optional[str] = None,
+        label_num: Optional[int] = None,
     ) -> None:
         inner_w = label_w - 10 * mm
         cx = x + label_w / 2
@@ -961,33 +965,63 @@ def generate_vi_labels_pdf(
         c.setLineWidth(0.8)
         c.rect(x, y, label_w, label_h)
 
-        # Date range (large bold, upper portion)
-        date_sz = _fit_size(date_str, "Helvetica-Bold", inner_w, start=60)
-        c.setFont("Helvetica-Bold", date_sz)
+        # Small label number in top-right corner
+        if label_num is not None:
+            c.setFont("Helvetica", 7)
+            c.setFillColorRGB(0.55, 0.55, 0.55)
+            num_str = str(label_num)
+            num_w = stringWidth(num_str, "Helvetica", 7)
+            c.drawString(x + label_w - num_w - 3 * mm, y + label_h - 4 * mm, num_str)
+            c.setFillColorRGB(0, 0, 0)
+
+        # Date range — normal font, large
+        date_sz = _fit_size(date_str, "Helvetica", inner_w, start=60)
+        c.setFont("Helvetica", date_sz)
         c.setFillColorRGB(0, 0, 0)
         c.drawCentredString(cx, y + label_h * 0.56, date_str)
 
-        # ID range – draw left ID, dash, and right ID as separate pieces so
-        # we can add a generous gap on each side of the dash.
+        # ID range — all normal font, same size; last 3 digits bold with 1 space before them
         sizing_str = (
             f"{id_left}    -    {id_right}" if id_right else f"{id_left}   -"
         )
         id_sz = _fit_size(sizing_str, "Helvetica", inner_w, start=28)
-        c.setFont("Helvetica", id_sz)
+        space_w = stringWidth(" ", "Helvetica", id_sz)
 
-        gap_w = stringWidth("    ", "Helvetica", id_sz)   # 4-space gap per side
+        def _id_w(sid: str) -> float:
+            pre = sid[:-3] if len(sid) > 3 else ""
+            last3 = sid[-3:] if len(sid) >= 3 else sid
+            return (
+                stringWidth(pre, "Helvetica", id_sz)
+                + space_w
+                + stringWidth(last3, "Helvetica-Bold", id_sz)
+            )
+
+        gap_w = stringWidth("    ", "Helvetica", id_sz)
         dash_w = stringWidth("-", "Helvetica", id_sz)
-        left_w = stringWidth(id_left, "Helvetica", id_sz)
-        right_w = stringWidth(id_right, "Helvetica", id_sz) if id_right else 0
+        left_w = _id_w(id_left)
+        right_w = _id_w(id_right) if id_right else 0
 
         total_w = left_w + gap_w + dash_w + (gap_w + right_w if id_right else 0)
         sx = cx - total_w / 2
         base_y = y + label_h * 0.28
 
-        c.drawString(sx, base_y, id_left)
-        c.drawString(sx + left_w + gap_w, base_y, "-")
+        def _draw_id(draw_x: float, sid: str) -> float:
+            pre = sid[:-3] if len(sid) > 3 else ""
+            last3 = sid[-3:] if len(sid) >= 3 else sid
+            if pre:
+                c.setFont("Helvetica", id_sz)
+                c.drawString(draw_x, base_y, pre)
+                draw_x += stringWidth(pre, "Helvetica", id_sz)
+            draw_x += space_w
+            c.setFont("Helvetica-Bold", id_sz)
+            c.drawString(draw_x, base_y, last3)
+            return draw_x + stringWidth(last3, "Helvetica-Bold", id_sz)
+
+        cur_x = _draw_id(sx, id_left)
+        c.setFont("Helvetica", id_sz)
+        c.drawString(cur_x + gap_w, base_y, "-")
         if id_right:
-            c.drawString(sx + left_w + gap_w + dash_w + gap_w, base_y, id_right)
+            _draw_id(cur_x + gap_w + dash_w + gap_w, id_right)
 
     def _label_parts(group: Dict):
         """Return (date_str, id_left, id_right) for a group."""
@@ -1007,18 +1041,112 @@ def generate_vi_labels_pdf(
             )
             return date_str, group["first_id"], None
 
-    # Two different groups per page (top = even index, bottom = odd index)
-    for i in range(0, len(groups), 2):
+    # Pair labels so cutting all pages in half and stacking gives sequential order:
+    # top half of every page = labels 0..half-1, bottom half = labels half..n-1
+    n_groups = len(groups)
+    half = (n_groups + 1) // 2
+    for i in range(half):
         top_ds, top_il, top_ir = _label_parts(groups[i])
-        _draw_label(margin_x, margin_y + gap + label_h, top_ds, top_il, top_ir)
-        if i + 1 < len(groups):
-            bot_ds, bot_il, bot_ir = _label_parts(groups[i + 1])
-            _draw_label(margin_x, margin_y, bot_ds, bot_il, bot_ir)
+        _draw_label(margin_x, margin_y + gap + label_h, top_ds, top_il, top_ir, label_num=i + 1)
+        j = i + half
+        if j < n_groups:
+            bot_ds, bot_il, bot_ir = _label_parts(groups[j])
+            _draw_label(margin_x, margin_y, bot_ds, bot_il, bot_ir, label_num=j + 1)
         c.showPage()
 
     c.save()
     buf.seek(0)
     return buf.read()
+
+
+# ---------------------------------------------------------------------------
+# GitHub Gist state helpers for Visual Inspection label continuity
+# ---------------------------------------------------------------------------
+
+def _vi_gist_load() -> dict:
+    """Read VI label state JSON from a GitHub Gist.
+
+    Requires ``GITHUB_TOKEN`` and ``GIST_ID`` to be set in Streamlit secrets.
+    Returns an empty dict if the Gist is unreachable or secrets are missing.
+    The Gist file is named ``vi_state.json``.
+    """
+    import requests as _req
+    try:
+        token = st.secrets["GITHUB_TOKEN"]
+        gist_id = st.secrets["GIST_ID"]
+    except (KeyError, Exception):
+        return {}
+    try:
+        resp = _req.get(
+            f"https://api.github.com/gists/{gist_id}",
+            headers={
+                "Authorization": f"token {token}",
+                "Accept": "application/vnd.github.v3+json",
+            },
+            timeout=10,
+        )
+        if resp.status_code != 200:
+            return {}
+        content = resp.json().get("files", {}).get("vi_state.json", {}).get("content", "{}")
+        return json.loads(content)
+    except Exception:
+        return {}
+
+
+def _vi_gist_save(state: dict) -> bool:
+    """Write VI label state JSON back to the GitHub Gist.
+
+    Returns ``True`` on success, ``False`` otherwise.
+    """
+    import requests as _req
+    try:
+        token = st.secrets["GITHUB_TOKEN"]
+        gist_id = st.secrets["GIST_ID"]
+    except (KeyError, Exception):
+        return False
+    try:
+        resp = _req.patch(
+            f"https://api.github.com/gists/{gist_id}",
+            headers={
+                "Authorization": f"token {token}",
+                "Accept": "application/vnd.github.v3+json",
+            },
+            json={"files": {"vi_state.json": {"content": json.dumps(state, indent=2)}}},
+            timeout=10,
+        )
+        return resp.status_code == 200
+    except Exception:
+        return False
+
+
+def _vi_hash_id(salt: str, donation_id: str) -> str:
+    """Return the SHA-256 hex digest of ``salt + donation_id``."""
+    return hashlib.sha256(f"{salt}{donation_id}".encode()).hexdigest()
+
+
+def _vi_find_next_start(
+    us_df: pd.DataFrame, prefix: str, salt: str, target_hash: str
+) -> Optional[str]:
+    """Return the donation ID that comes immediately after the one matching ``target_hash``.
+
+    Hashes every candidate ID (those starting with ``prefix``) using ``salt``
+    and compares against ``target_hash``.  Returns ``None`` if the hash is not
+    found or the matching ID is the last in the sorted list.
+    """
+    dn_col = us_df.get("Donation #", pd.Series(dtype=str)).fillna("").astype(str).str.strip()
+
+    def _num(x: str) -> int:
+        m = re.match(rf"^{re.escape(prefix)}(\d+)$", x, re.IGNORECASE)
+        return int(m.group(1)) if m else int(1e18)
+
+    candidates = sorted(
+        {x for x in dn_col if x.upper().startswith(prefix.upper()) and _num(x) < int(1e18)},
+        key=_num,
+    )
+    for idx, cid in enumerate(candidates):
+        if _vi_hash_id(salt, cid) == target_hash:
+            return candidates[idx + 1] if idx + 1 < len(candidates) else None
+    return None
 
 
 def main() -> None:
@@ -1076,6 +1204,45 @@ def main() -> None:
     if us_df is not None and "Donation #" in us_df.columns:
         us_df["Donation #"] = us_df["Donation #"].astype(str).str.strip()
         us_df.loc[us_df["Donation #"] == "nan", "Donation #"] = np.nan
+
+    # --- Duplicate ID warnings (shown immediately after upload, dismissible) ---
+    if gs_df is not None and "Sample ID" in gs_df.columns:
+        _gs_ids = gs_df["Sample ID"].dropna()
+        _gs_dupes = _gs_ids[_gs_ids.duplicated(keep=False)].unique().tolist()
+        if _gs_dupes:
+            _gs_key = f"dismiss_gs_dupes_{shipment_file.name}_{len(_gs_dupes)}"
+            if not st.session_state.get(_gs_key, False):
+                _ec1, _ec2 = st.columns([0.97, 0.03])
+                with _ec1:
+                    st.error(
+                        f"🚨 **DUPLICATE SAMPLE IDs DETECTED in shipment file** — {len(_gs_dupes)} duplicate(s):\n\n"
+                        + ", ".join(str(x) for x in sorted(_gs_dupes)),
+                        icon="🚨",
+                    )
+                with _ec2:
+                    st.write("")
+                    if st.button("✕", key=f"btn_{_gs_key}", help="Dismiss"):
+                        st.session_state[_gs_key] = True
+                        st.rerun()
+
+    if us_df is not None and "Donation #" in us_df.columns:
+        _us_ids = us_df["Donation #"].dropna()
+        _us_dupes = _us_ids[_us_ids.duplicated(keep=False)].unique().tolist()
+        if _us_dupes:
+            _us_key = f"dismiss_us_dupes_{unit_status_file.name}_{len(_us_dupes)}"
+            if not st.session_state.get(_us_key, False):
+                _uc1, _uc2 = st.columns([0.97, 0.03])
+                with _uc1:
+                    st.error(
+                        f"🚨 **DUPLICATE DONATION #s DETECTED in unit status file** — {len(_us_dupes)} duplicate(s):\n\n"
+                        + ", ".join(str(x) for x in sorted(_us_dupes)),
+                        icon="🚨",
+                    )
+                with _uc2:
+                    st.write("")
+                    if st.button("✕", key=f"btn_{_us_key}", help="Dismiss"):
+                        st.session_state[_us_key] = True
+                        st.rerun()
 
     # Compute and store a not_in_manifest set if both DataFrames are present
     if gs_df is not None and us_df is not None:
@@ -1804,6 +1971,24 @@ def main() -> None:
                 key="vi_group_size",
             )
 
+        # Load Gist state once per session (cached in session_state)
+        if "vi_gist_state" not in st.session_state:
+            st.session_state["vi_gist_state"] = _vi_gist_load()
+        _vi_gist_state = st.session_state["vi_gist_state"]
+        _vi_prefix_state = _vi_gist_state.get(vi_prefix, {})
+        _vi_gist_configured = bool(
+            _vi_prefix_state.get("salt") and _vi_prefix_state.get("last_complete_hash")
+        )
+
+        # Auto-detect start: find the ID after the last printed complete group
+        _vi_auto_start = ""
+        if _vi_gist_configured:
+            _vi_auto_start = _vi_find_next_start(
+                us_df, vi_prefix,
+                _vi_prefix_state["salt"],
+                _vi_prefix_state["last_complete_hash"],
+            ) or ""
+
         # Compute default start ID: first Quarantine unit from the latest date
         _vi_default_start = ""
         try:
@@ -1827,10 +2012,35 @@ def main() -> None:
         except Exception:
             pass
 
+        # Auto-detected takes priority over date-based default
+        _vi_effective_start = _vi_auto_start or _vi_default_start
+
+        # Show auto-detect info / reset button
+        if _vi_auto_start:
+            _last_updated = _vi_prefix_state.get("last_updated", "unknown date")
+            _info_col, _reset_col = st.columns([5, 1])
+            with _info_col:
+                st.info(
+                    f"Auto-detected start: **{_vi_auto_start}** "
+                    f"— continuing from last print on {_last_updated}"
+                )
+            with _reset_col:
+                st.write("")
+                if st.button("Reset", key="vi_reset_state", help="Clear saved state for this prefix"):
+                    _vi_gist_state.pop(vi_prefix, None)
+                    _vi_gist_save(_vi_gist_state)
+                    st.session_state["vi_gist_state"] = _vi_gist_state
+                    st.rerun()
+        elif not _vi_gist_configured:
+            st.caption(
+                "No saved state found for this prefix. "
+                "After generating a PDF the start position will be saved automatically."
+            )
+
         with vi_c2:
             vi_start_id = st.text_input(
                 "Start from donation ID",
-                value=_vi_default_start,
+                value=_vi_effective_start,
                 key="vi_start_id",
                 placeholder="e.g. F26-012401",
             ).strip()
@@ -1846,9 +2056,47 @@ def main() -> None:
                     if not vi_groups:
                         st.warning("No groups found from the specified start ID.")
                     else:
-                        _tomorrow = datetime.date.today() + datetime.timedelta(days=1)
+                        # End date = last donation date in the file + 1 day
+                        _all_dates = (
+                            us_df.get("Donation Date", pd.Series(dtype=str))
+                            .map(_parse_donation_date)
+                            .dropna()
+                        )
+                        _max_date = _all_dates.max() if not _all_dates.empty else None
+                        _tomorrow = (
+                            _max_date + datetime.timedelta(days=1)
+                            if _max_date
+                            else datetime.date.today()
+                        )
                         vi_pdf = generate_vi_labels_pdf(vi_groups, tomorrow=_tomorrow)
-                        st.success(f"Generated {len(vi_groups)} label(s).")
+
+                        # Save state: hash of last complete group's last ID
+                        _vi_last_complete = next(
+                            (g for g in reversed(vi_groups) if g["is_complete"]), None
+                        )
+                        if _vi_last_complete:
+                            _vi_state = st.session_state.get("vi_gist_state", {})
+                            _vi_ps = _vi_state.get(vi_prefix, {})
+                            _vi_salt = _vi_ps.get("salt") or _secrets_mod.token_hex(16)
+                            _vi_state[vi_prefix] = {
+                                "salt": _vi_salt,
+                                "last_complete_hash": _vi_hash_id(_vi_salt, _vi_last_complete["last_id"]),
+                                "last_updated": datetime.date.today().isoformat(),
+                            }
+                            _saved_ok = _vi_gist_save(_vi_state)
+                            st.session_state["vi_gist_state"] = _vi_state
+                            if _saved_ok:
+                                st.success(
+                                    f"Generated {len(vi_groups)} label(s). "
+                                    f"Next session will auto-start from the continuation point."
+                                )
+                            else:
+                                st.warning(
+                                    f"Generated {len(vi_groups)} label(s) but could not save state "
+                                    f"(check GITHUB_TOKEN and GIST_ID in Streamlit secrets)."
+                                )
+                        else:
+                            st.success(f"Generated {len(vi_groups)} label(s).")
                         st.download_button(
                             label=f"⬇ Download PDF ({len(vi_groups)} label pages)",
                             data=vi_pdf,

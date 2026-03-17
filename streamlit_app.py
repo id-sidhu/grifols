@@ -967,10 +967,10 @@ def generate_vi_labels_pdf(
 
         # Small label number in top-right corner
         if label_num is not None:
-            c.setFont("Helvetica", 7)
+            c.setFont("Helvetica", 14)
             c.setFillColorRGB(0.55, 0.55, 0.55)
             num_str = str(label_num)
-            num_w = stringWidth(num_str, "Helvetica", 7)
+            num_w = stringWidth(num_str, "Helvetica", 14)
             c.drawString(x + label_w - num_w - 3 * mm, y + label_h - 4 * mm, num_str)
             c.setFillColorRGB(0, 0, 0)
 

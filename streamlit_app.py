@@ -1149,6 +1149,144 @@ def _vi_find_next_start(
     return None
 
 
+def build_qc_release_comparison(qc_df: pd.DataFrame, us_df: pd.DataFrame) -> pd.DataFrame:
+    """Compare QC-report releases against unit-status for each donation date.
+
+    For every unique donation date found in *qc_df* the function counts:
+
+    * **Released (QC)** – units that appear in the QC report for that date.
+    * **Valid units (US)** – units in the unit-status file for that date whose
+      Status is ``"Quarantine"`` (i.e. a real donation that is not a no-bleed,
+      not rejected, and not sample-only).
+    * **Pending** – the difference (Valid − Released), clamped to 0.
+
+    Parameters
+    ----------
+    qc_df : pd.DataFrame
+        DataFrame with at least columns ``Unit ID`` and ``Don. date`` as
+        returned by :func:`parse_qc_report_pdf`.
+    us_df : pd.DataFrame
+        The raw unit-status DataFrame.  Must contain ``"Donation Date"`` and
+        ``"Status"`` columns.
+
+    Returns
+    -------
+    pd.DataFrame
+        One row per donation date with columns:
+        ``Don. date``, ``Released (QC)``, ``Valid units (US)``,
+        ``Pending``, ``Summary``.
+    """
+    if "Donation Date" not in us_df.columns:
+        raise ValueError("Column 'Donation Date' not found in unit status file.")
+    if "Status" not in us_df.columns:
+        raise ValueError("Column 'Status' not found in unit status file.")
+
+    # Keep only Quarantine units from unit status.
+    # This naturally excludes rejected, SO/sample-only, and no-bleeds
+    # (no-bleeds have no row in the file at all).
+    quarantine_mask = (
+        us_df["Status"].fillna("").astype(str).str.strip().str.lower() == "quarantine"
+    )
+    us_valid = us_df.loc[quarantine_mask].copy()
+    us_valid["_date"] = us_valid["Donation Date"].map(_parse_donation_date)
+
+    # Parse QC dates
+    qc = qc_df.copy()
+    qc["_date"] = qc["Don. date"].map(_parse_donation_date)
+
+    rows = []
+    for date_val in sorted(qc["_date"].dropna().unique()):
+        x = int((qc["_date"] == date_val).sum())
+        y = int((us_valid["_date"] == date_val).sum())
+        pending = max(0, y - x)
+        date_str = date_val.strftime("%d.%m.%Y")
+        rows.append(
+            {
+                "Don. date": date_str,
+                "Released (QC)": x,
+                "Valid units (US)": y,
+                "Pending": pending,
+                "Summary": f"{x} out of {y} units released" if y > 0 else f"{x} released (date not in US file)",
+            }
+        )
+
+    return pd.DataFrame(rows)
+
+
+def parse_qc_report_pdf(pdf_file) -> pd.DataFrame:
+    """Extract Unit ID and Don. date columns from a Grifols QC Report PDF.
+
+    Uses word-position extraction so it works even when pdfplumber cannot
+    detect a formal table structure in the PDF.  Each word is placed into a
+    visual row by snapping its vertical (top) coordinate to a small grid; any
+    row that contains both a Unit ID token (``F##-######``) and a date token
+    (``DD.MM.YYYY``) is kept.
+
+    Parameters
+    ----------
+    pdf_file : file-like object
+        An uploaded PDF file (e.g. from ``st.file_uploader``).
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame with columns ``Unit ID`` and ``Don. date``.
+    """
+    try:
+        import pdfplumber
+    except ImportError:
+        raise ImportError(
+            "pdfplumber is required to read PDFs. "
+            "Install it with:  pip install pdfplumber"
+        )
+
+    unit_id_pat = re.compile(r"^F\d{2}-\d{6}$")
+    # The date may be fused to an adjacent token (e.g. "1004153720.03.2026"),
+    # so we search *within* the token rather than requiring a full match.
+    date_search_pat = re.compile(r"\d{2}\.\d{2}\.\d{4}")
+
+    all_rows: List[Dict] = []
+
+    with pdfplumber.open(pdf_file) as pdf:
+        for page in pdf.pages:
+            # extract_words returns each word with its bounding box;
+            # x_tolerance/y_tolerance control how close characters must be
+            # to be merged into a single word.
+            words = page.extract_words(x_tolerance=5, y_tolerance=5)
+
+            # Group words into visual rows by snapping the top-coordinate
+            # to a 3-pixel grid (absorbs minor vertical misalignments).
+            row_buckets: Dict[int, List] = {}
+            for w in words:
+                bucket = round(w["top"] / 3) * 3
+                row_buckets.setdefault(bucket, []).append(w)
+
+            for bucket_y in sorted(row_buckets):
+                # Sort words left-to-right within the row
+                row_words = sorted(row_buckets[bucket_y], key=lambda w: w["x0"])
+                texts = [w["text"].strip() for w in row_words]
+
+                uid = next((t for t in texts if unit_id_pat.match(t)), None)
+
+                # Search each token for an embedded date (handles the case
+                # where the Donor ID and Don. date are merged without a space,
+                # e.g. "1004153720.03.2026").
+                don_date = None
+                for t in texts:
+                    m = date_search_pat.search(t)
+                    if m:
+                        don_date = m.group(0)
+                        break
+
+                # Only keep rows that have BOTH a Unit ID and a date on them.
+                # Header/footer rows contain dates but no Unit ID, so they
+                # are naturally excluded by this condition.
+                if uid and don_date:
+                    all_rows.append({"Unit ID": uid, "Don. date": don_date})
+
+    return pd.DataFrame(all_rows, columns=["Unit ID", "Don. date"])
+
+
 def main() -> None:
     """Run the Streamlit application.
 
@@ -1270,6 +1408,7 @@ def main() -> None:
                 "Manual racks/Unit Status Check",
                 "Pre-built Rack Browser",
                 "Visual Inspection Labels",
+                "QC Report PDF Extractor",
             ],
             key="nav_section",
         )
@@ -2139,6 +2278,131 @@ def main() -> None:
                     st.error(str(_e))
                 except Exception as _e:
                     st.exception(_e)
+
+    if nav_section == "QC Report PDF Extractor":
+        st.subheader("QC Report PDF Extractor")
+        st.write(
+            "Upload a Grifols QC Report PDF to extract **Unit ID** and "
+            "**Don. date** for each donation on the report."
+        )
+
+        qc_pdf_file = st.file_uploader(
+            "Upload QC Report PDF", type=["pdf"], key="qc_pdf"
+        )
+
+        if qc_pdf_file is not None:
+            debug_mode = st.checkbox("Show debug info", value=False, key="qc_debug")
+
+            if st.button("Extract Data", key="btn_extract_qc_pdf"):
+                try:
+                    import pdfplumber as _plumber
+                    qc_pdf_file.seek(0)
+
+                    if debug_mode:
+                        # ---- raw diagnosis ----
+                        unit_id_pat_dbg = re.compile(r"^F\d{2}-\d{6}$")
+                        date_pat_dbg = re.compile(r"^\d{2}\.\d{2}\.\d{4}$")
+                        with _plumber.open(qc_pdf_file) as _pdf:
+                            for _pi, _page in enumerate(_pdf.pages[:2]):
+                                st.markdown(f"**Page {_pi + 1}**")
+                                _words = _page.extract_words(x_tolerance=5, y_tolerance=5)
+                                st.write(f"Total words extracted: {len(_words)}")
+                                _uids = [w["text"] for w in _words if unit_id_pat_dbg.match(w["text"].strip())]
+                                _dates = [w["text"] for w in _words if date_pat_dbg.match(w["text"].strip())]
+                                st.write(f"Unit IDs found: {_uids}")
+                                st.write(f"Dates found: {_dates}")
+                                if _words:
+                                    st.write("First 30 words (text → top):",
+                                             [(w["text"], round(w["top"])) for w in _words[:30]])
+                                _raw = _page.extract_text() or ""
+                                with st.expander("Raw page text"):
+                                    st.text(_raw[:3000])
+                        qc_pdf_file.seek(0)
+
+                    qc_df = parse_qc_report_pdf(qc_pdf_file)
+                    if qc_df.empty:
+                        st.warning(
+                            "No records were found in the PDF. "
+                            "Enable **Show debug info** and click Extract Data again "
+                            "to see what pdfplumber is reading from this file."
+                        )
+                        st.session_state.pop("qc_extracted_df", None)
+                    else:
+                        st.session_state["qc_extracted_df"] = qc_df
+                except ImportError as _ie:
+                    st.error(str(_ie))
+                except Exception as _pe:
+                    st.exception(_pe)
+
+        if "qc_extracted_df" in st.session_state:
+            qc_result = st.session_state["qc_extracted_df"]
+            st.success(f"Extracted {len(qc_result)} donation record(s).")
+            st.dataframe(qc_result, use_container_width=True)
+            csv_bytes = qc_result.to_csv(index=False).encode("utf-8")
+            st.download_button(
+                label="Download as CSV",
+                data=csv_bytes,
+                file_name="qc_report_extracted.csv",
+                mime="text/csv",
+                key="qc_csv_dl",
+            )
+
+            # ------------------------------------------------------------------
+            # Release comparison against unit status
+            # ------------------------------------------------------------------
+            st.markdown("---")
+            st.subheader("Release Comparison by Date")
+            if us_df is None:
+                st.info(
+                    "Upload a **unit status file** (above) to compare QC releases "
+                    "against your unit status data."
+                )
+            else:
+                if st.button("Run Comparison", key="btn_qc_compare"):
+                    try:
+                        cmp_df = build_qc_release_comparison(qc_result, us_df)
+                        st.session_state["qc_comparison_df"] = cmp_df
+                    except ValueError as _ve:
+                        st.error(str(_ve))
+                    except Exception as _ce:
+                        st.exception(_ce)
+
+                if "qc_comparison_df" in st.session_state:
+                    cmp = st.session_state["qc_comparison_df"]
+
+                    # Colour rows: green = all released, amber = partial, red = none
+                    def _row_style(row):
+                        if row["Valid units (US)"] == 0:
+                            colour = "#fff3cd"  # amber – date not in US file
+                        elif row["Released (QC)"] >= row["Valid units (US)"]:
+                            colour = "#d4edda"  # green – fully released
+                        else:
+                            colour = "#fff3cd"  # amber – partially released
+                        return [f"background-color: {colour}"] * len(row)
+
+                    st.dataframe(
+                        cmp.style.apply(_row_style, axis=1),
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+
+                    # Totals
+                    total_released = int(cmp["Released (QC)"].sum())
+                    total_valid = int(cmp["Valid units (US)"].sum())
+                    total_pending = int(cmp["Pending"].sum())
+                    tc1, tc2, tc3 = st.columns(3)
+                    tc1.metric("Total Released", total_released)
+                    tc2.metric("Total Valid (US)", total_valid)
+                    tc3.metric("Still Pending", total_pending)
+
+                    cmp_csv = cmp.to_csv(index=False).encode("utf-8")
+                    st.download_button(
+                        label="Download comparison as CSV",
+                        data=cmp_csv,
+                        file_name="qc_release_comparison.csv",
+                        mime="text/csv",
+                        key="qc_cmp_csv_dl",
+                    )
 
     if nav_section in ["Manual racks/Unit Status Check", "Pre-built Rack Browser", "Visual Inspection Labels"] and us_df is None:
         st.info("Please upload a unit status file to use this section.")

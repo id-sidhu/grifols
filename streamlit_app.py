@@ -60,8 +60,7 @@ import streamlit as st
 # ---------------------------------------------------------------------------
 # Feature flags
 # Set a section to False to hide it from the navigation bar.
-# Hidden sections remain accessible by adding ?unlock=<UNLOCK_KEY> to the URL,
-# e.g.  http://localhost:8501/?unlock=grifols2024
+# Hidden sections remain accessible by adding ?unlock=<your_key> to the URL.
 # ---------------------------------------------------------------------------
 FEATURES: Dict[str, bool] = {
     "Pallet Report": True,
@@ -70,7 +69,9 @@ FEATURES: Dict[str, bool] = {
     "Visual Inspection Labels": True,
     "QC Report PDF Extractor": False,
 }
-UNLOCK_KEY: str = "grifols2024"
+# UNLOCK_KEY is loaded at runtime from Streamlit secrets (see .streamlit/secrets.toml
+# locally, or the Streamlit Cloud "Secrets" panel in production).
+# It is intentionally NOT hardcoded here so it is never visible in the public repo.
 
 
 def clean_unit_status(us_df: pd.DataFrame) -> pd.DataFrame:
@@ -1443,7 +1444,8 @@ def main() -> None:
         st.session_state["not_in_manifest"] = []
 
     # Check URL for the unlock key — exposes all hidden sections when present
-    _is_unlocked = st.query_params.get("unlock", "") == UNLOCK_KEY
+    _unlock_key = st.secrets.get("UNLOCK_KEY", "")
+    _is_unlocked = bool(_unlock_key) and st.query_params.get("unlock", "") == _unlock_key
 
     _all_sections = [
         "Pallet Report",

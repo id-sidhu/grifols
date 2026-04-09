@@ -57,6 +57,21 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
+# ---------------------------------------------------------------------------
+# Feature flags
+# Set a section to False to hide it from the navigation bar.
+# Hidden sections remain accessible by adding ?unlock=<UNLOCK_KEY> to the URL,
+# e.g.  http://localhost:8501/?unlock=grifols2024
+# ---------------------------------------------------------------------------
+FEATURES: Dict[str, bool] = {
+    "Pallet Report": True,
+    "Manual racks/Unit Status Check": True,
+    "Pre-built Rack Browser": True,
+    "Visual Inspection Labels": True,
+    "QC Report PDF Extractor": False,
+}
+UNLOCK_KEY: str = "grifols2024"
+
 
 def clean_unit_status(us_df: pd.DataFrame) -> pd.DataFrame:
     """Filter out rows from the unit status DataFrame based on status patterns.
@@ -1427,18 +1442,29 @@ def main() -> None:
     else:
         st.session_state["not_in_manifest"] = []
 
+    # Check URL for the unlock key — exposes all hidden sections when present
+    _is_unlocked = st.query_params.get("unlock", "") == UNLOCK_KEY
+
+    _all_sections = [
+        "Pallet Report",
+        "Manual racks/Unit Status Check",
+        "Pre-built Rack Browser",
+        "Visual Inspection Labels",
+        "QC Report PDF Extractor",
+    ]
+    _visible_sections = (
+        _all_sections if _is_unlocked
+        else [s for s in _all_sections if FEATURES.get(s, True)]
+    )
+
     # Sidebar: navigation + section-specific controls
     with st.sidebar:
         st.header("Navigation")
+        if _is_unlocked:
+            st.caption("🔓 All sections unlocked")
         nav_section = st.radio(
             "Go to section",
-            [
-                "Pallet Report",
-                "Manual racks/Unit Status Check",
-                "Pre-built Rack Browser",
-                "Visual Inspection Labels",
-                "QC Report PDF Extractor",
-            ],
+            _visible_sections,
             key="nav_section",
         )
         st.markdown("---")

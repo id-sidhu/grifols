@@ -2282,53 +2282,70 @@ def main() -> None:
     if nav_section == "QC Report PDF Extractor":
         st.subheader("QC Report PDF Extractor")
         st.write(
-            "Upload a Grifols QC Report PDF to extract **Unit ID** and "
-            "**Don. date** for each donation on the report."
+            "Upload one or more Grifols QC Report PDFs to extract **Unit ID** and "
+            "**Don. date** for each donation on the report.  Results from all files "
+            "are combined and deduplicated."
         )
 
-        qc_pdf_file = st.file_uploader(
-            "Upload QC Report PDF", type=["pdf"], key="qc_pdf"
+        qc_pdf_files = st.file_uploader(
+            "Upload QC Report PDF(s)", type=["pdf"], key="qc_pdf",
+            accept_multiple_files=True,
         )
 
-        if qc_pdf_file is not None:
+        if qc_pdf_files:
             debug_mode = st.checkbox("Show debug info", value=False, key="qc_debug")
 
             if st.button("Extract Data", key="btn_extract_qc_pdf"):
                 try:
                     import pdfplumber as _plumber
-                    qc_pdf_file.seek(0)
-
-                    if debug_mode:
-                        # ---- raw diagnosis ----
-                        unit_id_pat_dbg = re.compile(r"^F\d{2}-\d{6}$")
-                        date_pat_dbg = re.compile(r"^\d{2}\.\d{2}\.\d{4}$")
-                        with _plumber.open(qc_pdf_file) as _pdf:
-                            for _pi, _page in enumerate(_pdf.pages[:2]):
-                                st.markdown(f"**Page {_pi + 1}**")
-                                _words = _page.extract_words(x_tolerance=5, y_tolerance=5)
-                                st.write(f"Total words extracted: {len(_words)}")
-                                _uids = [w["text"] for w in _words if unit_id_pat_dbg.match(w["text"].strip())]
-                                _dates = [w["text"] for w in _words if date_pat_dbg.match(w["text"].strip())]
-                                st.write(f"Unit IDs found: {_uids}")
-                                st.write(f"Dates found: {_dates}")
-                                if _words:
-                                    st.write("First 30 words (text → top):",
-                                             [(w["text"], round(w["top"])) for w in _words[:30]])
-                                _raw = _page.extract_text() or ""
-                                with st.expander("Raw page text"):
-                                    st.text(_raw[:3000])
+                    all_frames: List[pd.DataFrame] = []
+                    for qc_pdf_file in qc_pdf_files:
                         qc_pdf_file.seek(0)
 
-                    qc_df = parse_qc_report_pdf(qc_pdf_file)
-                    if qc_df.empty:
+                        if debug_mode:
+                            st.markdown(f"#### Debug: {qc_pdf_file.name}")
+                            # ---- raw diagnosis ----
+                            unit_id_pat_dbg = re.compile(r"^F\d{2}-\d{6}$")
+                            date_pat_dbg = re.compile(r"^\d{2}\.\d{2}\.\d{4}$")
+                            with _plumber.open(qc_pdf_file) as _pdf:
+                                for _pi, _page in enumerate(_pdf.pages[:2]):
+                                    st.markdown(f"**Page {_pi + 1}**")
+                                    _words = _page.extract_words(x_tolerance=5, y_tolerance=5)
+                                    st.write(f"Total words extracted: {len(_words)}")
+                                    _uids = [w["text"] for w in _words if unit_id_pat_dbg.match(w["text"].strip())]
+                                    _dates = [w["text"] for w in _words if date_pat_dbg.match(w["text"].strip())]
+                                    st.write(f"Unit IDs found: {_uids}")
+                                    st.write(f"Dates found: {_dates}")
+                                    if _words:
+                                        st.write("First 30 words (text → top):",
+                                                 [(w["text"], round(w["top"])) for w in _words[:30]])
+                                    _raw = _page.extract_text() or ""
+                                    with st.expander("Raw page text"):
+                                        st.text(_raw[:3000])
+                            qc_pdf_file.seek(0)
+
+                        _df = parse_qc_report_pdf(qc_pdf_file)
+                        if _df.empty:
+                            st.warning(f"No records found in **{qc_pdf_file.name}**.")
+                        else:
+                            all_frames.append(_df)
+
+                    if not all_frames:
                         st.warning(
-                            "No records were found in the PDF. "
+                            "No records were found in any of the uploaded PDFs. "
                             "Enable **Show debug info** and click Extract Data again "
-                            "to see what pdfplumber is reading from this file."
+                            "to see what pdfplumber is reading from these files."
                         )
                         st.session_state.pop("qc_extracted_df", None)
                     else:
+                        qc_df = pd.concat(all_frames, ignore_index=True).drop_duplicates()
                         st.session_state["qc_extracted_df"] = qc_df
+                        if len(qc_pdf_files) > 1:
+                            st.info(
+                                f"Combined {len(qc_pdf_files)} file(s): "
+                                f"{sum(len(f) for f in all_frames)} total rows → "
+                                f"{len(qc_df)} after deduplication."
+                            )
                 except ImportError as _ie:
                     st.error(str(_ie))
                 except Exception as _pe:

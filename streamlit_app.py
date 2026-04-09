@@ -1149,7 +1149,11 @@ def _vi_find_next_start(
     return None
 
 
-def build_qc_release_comparison(qc_df: pd.DataFrame, us_df: pd.DataFrame) -> pd.DataFrame:
+def build_qc_release_comparison(
+    qc_df: pd.DataFrame,
+    us_df: pd.DataFrame,
+    gs_df: Optional[pd.DataFrame] = None,
+) -> Tuple[pd.DataFrame, Dict]:
     """Compare QC-report releases against unit-status for each donation date.
 
     For every unique donation date found in *qc_df* the function counts:
@@ -1159,6 +1163,12 @@ def build_qc_release_comparison(qc_df: pd.DataFrame, us_df: pd.DataFrame) -> pd.
       Status is ``"Quarantine"`` (i.e. a real donation that is not a no-bleed,
       not rejected, and not sample-only).
     * **Pending** – the difference (Valid − Released), clamped to 0.
+    * **Packed** *(optional)* – QC units for that date already packed in the
+      shipment file (``"Samples Packed?"`` is non-empty).
+    * **To pack** *(optional)* – QC units present in the shipment file but
+      not yet packed.
+    * **Not in manifest** *(optional)* – QC units absent from the shipment
+      file entirely.
 
     Parameters
     ----------
@@ -1168,13 +1178,17 @@ def build_qc_release_comparison(qc_df: pd.DataFrame, us_df: pd.DataFrame) -> pd.
     us_df : pd.DataFrame
         The raw unit-status DataFrame.  Must contain ``"Donation Date"`` and
         ``"Status"`` columns.
+    gs_df : pd.DataFrame or None
+        Optional Grifols shipment DataFrame.  When supplied, packed/to-pack/
+        not-in-manifest counts and ID lists are included in the output.
 
     Returns
     -------
-    pd.DataFrame
-        One row per donation date with columns:
-        ``Don. date``, ``Released (QC)``, ``Valid units (US)``,
-        ``Pending``, ``Summary``.
+    tuple
+        ``(summary_df, detail)`` where *summary_df* is one row per donation
+        date and *detail* is a dict mapping ``date_str →
+        {"packed": [...], "to_pack": [...], "not_manifest": [...]}``.
+        The detail dict is empty when *gs_df* is ``None``.
     """
     if "Donation Date" not in us_df.columns:
         raise ValueError("Column 'Donation Date' not found in unit status file.")
@@ -1182,8 +1196,6 @@ def build_qc_release_comparison(qc_df: pd.DataFrame, us_df: pd.DataFrame) -> pd.
         raise ValueError("Column 'Status' not found in unit status file.")
 
     # Keep only Quarantine units from unit status.
-    # This naturally excludes rejected, SO/sample-only, and no-bleeds
-    # (no-bleeds have no row in the file at all).
     quarantine_mask = (
         us_df["Status"].fillna("").astype(str).str.strip().str.lower() == "quarantine"
     )
@@ -1194,23 +1206,40 @@ def build_qc_release_comparison(qc_df: pd.DataFrame, us_df: pd.DataFrame) -> pd.
     qc = qc_df.copy()
     qc["_date"] = qc["Don. date"].map(_parse_donation_date)
 
+    # Units in the shipment file = already packed (the file is the packing manifest).
+    # Units in QC but NOT in the shipment file = still need to be packed.
+    shipment_ids: Set[str] = set()
+    has_shipment = gs_df is not None and "Sample ID" in gs_df.columns
+    if has_shipment:
+        shipment_ids = set(gs_df["Sample ID"].dropna().astype(str).str.strip())
+
     rows = []
+    detail: Dict[str, Dict] = {}
     for date_val in sorted(qc["_date"].dropna().unique()):
-        x = int((qc["_date"] == date_val).sum())
+        date_str = date_val.strftime("%d.%m.%Y")
+        date_uids = qc.loc[qc["_date"] == date_val, "Unit ID"].astype(str).str.strip().tolist()
+        x = len(date_uids)
         y = int((us_valid["_date"] == date_val).sum())
         pending = max(0, y - x)
-        date_str = date_val.strftime("%d.%m.%Y")
-        rows.append(
-            {
-                "Don. date": date_str,
-                "Released (QC)": x,
-                "Valid units (US)": y,
-                "Pending": pending,
-                "Summary": f"{x} out of {y} units released" if y > 0 else f"{x} released (date not in US file)",
+        row: Dict = {
+            "Don. date": date_str,
+            "Released (QC)": x,
+            "Valid units (US)": y,
+            "Pending": pending,
+            "Summary": f"{x} out of {y} units released" if y > 0 else f"{x} released (date not in US file)",
+        }
+        if has_shipment:
+            packed_list = sorted(u for u in date_uids if u in shipment_ids)
+            still_to_pack_list = sorted(u for u in date_uids if u not in shipment_ids)
+            row["Packed"] = len(packed_list)
+            row["Still to pack"] = len(still_to_pack_list)
+            detail[date_str] = {
+                "packed": packed_list,
+                "still_to_pack": still_to_pack_list,
             }
-        )
+        rows.append(row)
 
-    return pd.DataFrame(rows)
+    return pd.DataFrame(rows), detail
 
 
 def parse_qc_report_pdf(pdf_file) -> pd.DataFrame:
@@ -2377,8 +2406,11 @@ def main() -> None:
             else:
                 if st.button("Run Comparison", key="btn_qc_compare"):
                     try:
-                        cmp_df = build_qc_release_comparison(qc_result, us_df)
+                        cmp_df, cmp_detail = build_qc_release_comparison(
+                            qc_result, us_df, gs_df=gs_df
+                        )
                         st.session_state["qc_comparison_df"] = cmp_df
+                        st.session_state["qc_comparison_detail"] = cmp_detail
                     except ValueError as _ve:
                         st.error(str(_ve))
                     except Exception as _ce:
@@ -2386,6 +2418,8 @@ def main() -> None:
 
                 if "qc_comparison_df" in st.session_state:
                     cmp = st.session_state["qc_comparison_df"]
+                    cmp_detail = st.session_state.get("qc_comparison_detail", {})
+                    has_shipment_cols = "Packed" in cmp.columns and "Still to pack" in cmp.columns
 
                     # Colour rows: green = all released, amber = partial, red = none
                     def _row_style(row):
@@ -2407,10 +2441,56 @@ def main() -> None:
                     total_released = int(cmp["Released (QC)"].sum())
                     total_valid = int(cmp["Valid units (US)"].sum())
                     total_pending = int(cmp["Pending"].sum())
-                    tc1, tc2, tc3 = st.columns(3)
-                    tc1.metric("Total Released", total_released)
-                    tc2.metric("Total Valid (US)", total_valid)
-                    tc3.metric("Still Pending", total_pending)
+
+                    if has_shipment_cols:
+                        total_packed = int(cmp["Packed"].sum())
+                        total_still_to_pack = int(cmp["Still to pack"].sum())
+                        mc1, mc2, mc3, mc4 = st.columns(4)
+                        mc1.metric("Total Released (QC)", total_released)
+                        mc2.metric("Valid units (US)", total_valid)
+                        mc3.metric("Already packed", total_packed)
+                        mc4.metric("Still to pack", total_still_to_pack)
+                    else:
+                        tc1, tc2, tc3 = st.columns(3)
+                        tc1.metric("Total Released", total_released)
+                        tc2.metric("Total Valid (US)", total_valid)
+                        tc3.metric("Still Pending", total_pending)
+
+                    # Per-date expandable ID lists (only when shipment file loaded)
+                    if has_shipment_cols and cmp_detail:
+                        st.markdown("#### Per-date packing detail")
+                        for _, _cmp_row in cmp.iterrows():
+                            _ds = _cmp_row["Don. date"]
+                            _d = cmp_detail.get(_ds, {})
+                            _packed_list = _d.get("packed", [])
+                            _still_list = _d.get("still_to_pack", [])
+                            _label = (
+                                f"{_ds} — "
+                                f"{len(_packed_list)} packed, "
+                                f"{len(_still_list)} still to pack"
+                            )
+                            with st.expander(_label):
+                                _exp_c1, _exp_c2 = st.columns(2)
+                                with _exp_c1:
+                                    st.markdown("**Already packed**")
+                                    if _packed_list:
+                                        st.dataframe(
+                                            pd.DataFrame({"Unit ID": _packed_list}),
+                                            hide_index=True,
+                                            use_container_width=True,
+                                        )
+                                    else:
+                                        st.caption("None")
+                                with _exp_c2:
+                                    st.markdown("**Still to pack**")
+                                    if _still_list:
+                                        st.dataframe(
+                                            pd.DataFrame({"Unit ID": _still_list}),
+                                            hide_index=True,
+                                            use_container_width=True,
+                                        )
+                                    else:
+                                        st.caption("All packed!")
 
                     cmp_csv = cmp.to_csv(index=False).encode("utf-8")
                     st.download_button(

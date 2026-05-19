@@ -1352,7 +1352,21 @@ def parse_master_sheet(ms_file) -> Dict:
         row_labels, categories (label → {date_str: int})
     """
     ms_file.seek(0)
-    raw = pd.read_csv(ms_file, header=None, dtype=str).fillna("")
+    raw_bytes = ms_file.read()
+    for _enc in ("utf-8", "utf-8-sig", "cp1252", "latin-1"):
+        try:
+            import io as _io
+            raw = pd.read_csv(
+                _io.BytesIO(raw_bytes), header=None, dtype=str, encoding=_enc
+            ).fillna("")
+            break
+        except (UnicodeDecodeError, Exception):
+            continue
+    else:
+        raise ValueError(
+            "Could not decode the master sheet CSV. "
+            "Try saving it as UTF-8 in Excel (File → Save As → CSV UTF-8)."
+        )
     n_rows, n_cols = raw.shape
     result: Dict = {}
 
@@ -3005,9 +3019,21 @@ def main() -> None:
                     ):
                         try:
                             _ms_file.seek(0)
-                            _raw_ms = pd.read_csv(
-                                _ms_file, header=None, dtype=str
-                            ).fillna("")
+                            _raw_bytes_apply = _ms_file.read()
+                            _raw_ms = None
+                            for _enc_apply in ("utf-8", "utf-8-sig", "cp1252", "latin-1"):
+                                try:
+                                    import io as _io_apply
+                                    _raw_ms = pd.read_csv(
+                                        _io_apply.BytesIO(_raw_bytes_apply),
+                                        header=None, dtype=str, encoding=_enc_apply,
+                                    ).fillna("")
+                                    break
+                                except (UnicodeDecodeError, Exception):
+                                    continue
+                            if _raw_ms is None:
+                                st.error("Failed to re-read master sheet for writing.")
+                                raise RuntimeError("Encoding error on re-read.")
 
                             # Locate column index for the selected date
                             _date_row_raw = _raw_ms.iloc[_fd["date_row_idx"]]

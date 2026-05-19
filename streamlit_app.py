@@ -2841,23 +2841,25 @@ def main() -> None:
                         )
 
                     # ----------------------------------------------------------
-                    # Column (d): a(today) + d(yesterday)
+                    # Column (d): a(yesterday) + d(yesterday)
                     # ----------------------------------------------------------
-                    _col_d_prev = 0
-                    _col_d_note = f"First date in master sheet — d = a = {_col_a}"
+                    _col_d_prev_a = 0
+                    _col_d_prev_d = 0
+                    _col_d_note = "First date in master sheet — no previous date available, d = 0"
                     if _sel_date_str in _ms_dates:
                         _date_idx_d = _ms_dates.index(_sel_date_str)
                         if _date_idx_d > 0:
                             _prev_date_str = _ms_dates[_date_idx_d - 1]
                             for _lbl, _lbl_vals in _fd["categories"].items():
-                                if "waiting test results" in _lbl.lower():
-                                    _col_d_prev = _lbl_vals.get(_prev_date_str, 0)
-                                    break
+                                if "day 1 freezing" in _lbl.lower():
+                                    _col_d_prev_a = _lbl_vals.get(_prev_date_str, 0)
+                                elif "waiting test results" in _lbl.lower():
+                                    _col_d_prev_d = _lbl_vals.get(_prev_date_str, 0)
                             _col_d_note = (
-                                f"a({_sel_date_str}) [{_col_a}] + "
-                                f"d({_prev_date_str}) [{_col_d_prev}]"
+                                f"a({_prev_date_str}) [{_col_d_prev_a}] + "
+                                f"d({_prev_date_str}) [{_col_d_prev_d}]"
                             )
-                    _col_d = _col_a + _col_d_prev
+                    _col_d = _col_d_prev_a + _col_d_prev_d
 
                     # ----------------------------------------------------------
                     # Columns (e) & (f): Donor ID analysis

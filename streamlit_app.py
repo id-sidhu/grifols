@@ -69,10 +69,45 @@ FEATURES: Dict[str, bool] = {
     "Visual Inspection Labels": True,
     "QC Report PDF Extractor": False,
     "Master Sheet Ejaculator": True,
+    "Storage Manager": True,
 }
+
+# Default verbosity. Users can toggle this live from the sidebar.
+VERBOSE_DEFAULT: bool = True
+
 # UNLOCK_KEY is loaded at runtime from Streamlit secrets (see .streamlit/secrets.toml
 # locally, or the Streamlit Cloud "Secrets" panel in production).
 # It is intentionally NOT hardcoded here so it is never visible in the public repo.
+
+
+def _verbose() -> bool:
+    """Return current verbosity setting (True = show feedback messages)."""
+    return st.session_state.get("_verbose", VERBOSE_DEFAULT)
+
+
+def _show_success(msg: str) -> None:
+    if _verbose():
+        st.success(msg)
+
+
+def _show_error(msg: str) -> None:
+    if _verbose():
+        st.error(msg)
+
+
+def _show_warning(msg: str) -> None:
+    if _verbose():
+        st.warning(msg)
+
+
+def _show_info(msg: str) -> None:
+    if _verbose():
+        st.info(msg)
+
+
+def _show_caption(msg: str) -> None:
+    if _verbose():
+        st.caption(msg)
 
 
 def clean_unit_status(us_df: pd.DataFrame) -> pd.DataFrame:
@@ -1354,6 +1389,26 @@ def _get_supabase_client():
         return None
 
 
+def _get_supabase_error() -> str:
+    """Return a human-readable reason why Supabase failed to connect, or empty string."""
+    try:
+        from supabase import create_client  # noqa: F401
+    except ImportError:
+        return "supabase package not installed (run: pip install supabase)"
+    url = st.secrets.get("SUPABASE_URL", "")
+    key = st.secrets.get("SUPABASE_KEY", "")
+    if not url:
+        return "SUPABASE_URL missing from secrets.toml"
+    if not key:
+        return "SUPABASE_KEY missing from secrets.toml"
+    try:
+        from supabase import create_client
+        create_client(url, key)
+        return ""
+    except Exception as e:
+        return str(e)
+
+
 def _sb_list_files(client, folder: str) -> List[str]:
     """Return sorted file names inside a Supabase storage folder."""
     try:
@@ -1374,15 +1429,25 @@ def _sb_download(client, path: str) -> Optional[bytes]:
         return None
 
 
-def _sb_upload(client, path: str, data: bytes, mime: str = "text/csv") -> bool:
-    """Upsert a file to Supabase storage. Returns True on success."""
+def _sb_upload(client, path: str, data: bytes, mime: str = "text/csv"):
+    """Upsert a file to Supabase storage. Returns True on success, error string on failure."""
     try:
         client.storage.from_(_SUPABASE_BUCKET).upload(
             path, data, file_options={"content-type": mime, "upsert": "true"},
         )
         return True
-    except Exception:
-        return False
+    except Exception as e:
+        return str(e)
+
+
+def _sb_delete(client, path: str):
+    """Delete a file from Supabase storage. Returns True on success, error string on failure."""
+    try:
+        client.storage.from_(_SUPABASE_BUCKET).remove([path])
+        return True
+    except Exception as e:
+        return str(e)
+
 
 
 def _sb_file_widget(
@@ -1427,21 +1492,22 @@ def _sb_file_widget(
     # ---- save button(s) for freshly uploaded files ----
     if uploaded and not accept_multiple:
         if st.button(
-            f"💾  Save '{uploaded.name}' to storage",
+            f"Save '{uploaded.name}' to storage",
             key=f"{uploader_key}_sb_save",
         ):
             uploaded.seek(0)
             _raw = uploaded.read()
             uploaded.seek(0)
-            if _sb_upload(client, f"{folder}/{uploaded.name}", _raw, mime=save_mime):
-                st.success(f"Saved to storage: **{uploaded.name}**")
+            _result = _sb_upload(client, f"{folder}/{uploaded.name}", _raw, mime=save_mime)
+            if _result is True:
+                _show_success(f"Saved to storage: **{uploaded.name}**")
                 st.session_state[_ls_key] = _sb_list_files(client, folder)
             else:
-                st.error("Save failed — check Supabase credentials and bucket permissions.")
+                _show_error(f"Save failed: {_result}")
 
     elif uploaded and accept_multiple:
         if st.button(
-            f"💾  Save {len(uploaded)} file(s) to storage",
+            f"Save {len(uploaded)} file(s) to storage",
             key=f"{uploader_key}_sb_save",
         ):
             _saved, _failed = [], []
@@ -1454,10 +1520,10 @@ def _sb_file_widget(
                 else:
                     _failed.append(_uf.name)
             if _saved:
-                st.success(f"Saved: {', '.join(_saved)}")
+                _show_success(f"Saved: {', '.join(_saved)}")
                 st.session_state[_ls_key] = _sb_list_files(client, folder)
             if _failed:
-                st.warning(f"Failed to save: {', '.join(_failed)}")
+                _show_warning(f"Failed to save: {', '.join(_failed)}")
 
     # ---- load from storage ----
     if _sb_files:
@@ -1492,7 +1558,7 @@ def _sb_file_widget(
                 st.session_state.pop(_ln_key, None)
                 st.session_state.pop(_ld_key, None)
     elif not uploaded:
-        st.caption(f"No files in storage folder `{folder}/` yet — upload one above.")
+        _show_caption(f"No files in storage folder `{folder}/` yet — upload one above.")
 
     # ---- determine return value ----
     if uploaded:
@@ -1509,7 +1575,7 @@ def _sb_file_widget(
         if not accept_multiple:
             _f = _io_sb.BytesIO(_cached_data)
             _f.name = _cached_name
-            st.info(f"Using from storage: **{_cached_name}**")
+            _show_info(f"Using from storage: **{_cached_name}**")
             return _f
         else:
             _files_sb: List = []
@@ -1518,7 +1584,7 @@ def _sb_file_widget(
                 _f.name = _fn
                 _files_sb.append(_f)
             if _files_sb:
-                st.info(f"Using from storage: **{', '.join(_cached_data.keys())}**")
+                _show_info(f"Using from storage: **{', '.join(_cached_data.keys())}**")
             return _files_sb
 
     return [] if accept_multiple else None
@@ -1645,10 +1711,14 @@ def main() -> None:
     # Initialise Supabase once per session (None when secrets are not configured)
     if "_sb_client_cache" not in st.session_state:
         st.session_state["_sb_client_cache"] = _get_supabase_client()
+        st.session_state["_sb_client_error"] = _get_supabase_error()
     _sb_client = st.session_state["_sb_client_cache"]
+    _sb_error = st.session_state.get("_sb_client_error")
 
     if _sb_client:
-        st.caption("☁️ Connected to Supabase storage — files can be saved and loaded from the cloud.")
+        _show_caption("Connected to Supabase storage.")
+    elif _sb_error:
+        _show_warning(f"Supabase not connected:{_sb_error}")
 
     shipment_file = _sb_file_widget(
         "Upload Grifols shipment file",
@@ -1678,7 +1748,7 @@ def main() -> None:
                 kwargs = {"dtype": dtype} if dtype else {}
                 return pd.read_csv(uploaded_file, **kwargs)
         except Exception as e:
-            st.error(f"Failed to read {uploaded_file.name}: {e}")
+            _show_error(f"Failed to read {uploaded_file.name}: {e}")
             return None
 
     # Load the DataFrames
@@ -1703,7 +1773,7 @@ def main() -> None:
             if not st.session_state.get(_gs_key, False):
                 _ec1, _ec2 = st.columns([0.97, 0.03])
                 with _ec1:
-                    st.error(
+                    _show_error(
                         f"🚨 **DUPLICATE SAMPLE IDs DETECTED in shipment file** — {len(_gs_dupes)} duplicate(s):\n\n"
                         + ", ".join(str(x) for x in sorted(_gs_dupes)),
                         icon="🚨",
@@ -1722,7 +1792,7 @@ def main() -> None:
             if not st.session_state.get(_us_key, False):
                 _uc1, _uc2 = st.columns([0.97, 0.03])
                 with _uc1:
-                    st.error(
+                    _show_error(
                         f"🚨 **DUPLICATE DONATION #s DETECTED in unit status file** — {len(_us_dupes)} duplicate(s):\n\n"
                         + ", ".join(str(x) for x in sorted(_us_dupes)),
                         icon="🚨",
@@ -1760,6 +1830,7 @@ def main() -> None:
         "Visual Inspection Labels",
         "QC Report PDF Extractor",
         "Master Sheet Ejaculator",
+        "Storage Manager",
     ]
     _visible_sections = (
         _all_sections if _is_unlocked
@@ -1770,7 +1841,13 @@ def main() -> None:
     with st.sidebar:
         st.header("Navigation")
         if _is_unlocked:
-            st.caption("🔓 All sections unlocked")
+            _show_caption("All sections unlocked")
+        st.toggle(
+            "Verbose",
+            value=st.session_state.get("_verbose", VERBOSE_DEFAULT),
+            key="_verbose",
+        )
+        st.markdown("---")
         nav_section = st.radio(
             "Go to section",
             _visible_sections,
@@ -1828,7 +1905,7 @@ def main() -> None:
                 st.session_state["pallet_f26_ids"] = f26_ids
                 st.session_state["pallet_no_last"] = int(pallet_no)
             except ValueError as ve:
-                st.error(str(ve))
+                _show_error(str(ve))
             except Exception as e:
                 st.exception(e)
         # Display the last generated pallet report if available
@@ -1894,7 +1971,7 @@ def main() -> None:
                     else:
                         st.write("No F26 IDs found.")
     elif nav_section == "Pallet Report":
-        st.info("Please upload a Grifols shipment file to begin the pallet report.")
+        _show_info("Please upload a Grifols shipment file to begin the pallet report.")
 
     # If unit status CSV is loaded, provide inputs and allow control number checks
     if nav_section == "Manual racks/Unit Status Check" and us_df is not None:
@@ -1915,7 +1992,7 @@ def main() -> None:
 
         if check_btn:
             if not suffix_input:
-                st.error("Please enter the control number(s).")
+                _show_error("Please enter the control number(s).")
             else:
                 try:
                     # Clean the unit status DataFrame once per check
@@ -1925,7 +2002,7 @@ def main() -> None:
                         # Range mode: expect exactly two values
                         parts = [p.strip() for p in suffix_input.split(",") if p.strip()]
                         if len(parts) != 2:
-                            st.error("Please enter exactly two control numbers separated by a comma.")
+                            _show_error("Please enter exactly two control numbers separated by a comma.")
                         else:
                             # Build full IDs (with prefix) for the range bounds
                             full_ids: List[str] = []
@@ -1965,18 +2042,18 @@ def main() -> None:
                             ids_between = [iid for iid in not_manifest_ids_filtered if start_num <= extract_num(iid) <= end_num]
                             ids_between_sorted = sorted(ids_between, key=extract_num)
                             if ids_between_sorted:
-                                st.success(f"IDs in not_in_manifest between {start_id} and {end_id} (excluding removed):")
+                                _show_success(f"IDs in not_in_manifest between {start_id} and {end_id} (excluding removed):")
                                 ids_df = pd.DataFrame({"Missing IDs": ids_between_sorted})
                                 st.dataframe(ids_df)
                             else:
-                                st.info("No IDs in not_in_manifest found within the specified range after excluding removed IDs.")
+                                _show_info("No IDs in not_in_manifest found within the specified range after excluding removed IDs.")
                             # Show rejected units whose samples were collected, within the range
                             sc_in_range = sorted(
                                 [iid for iid in samples_collected_set if start_num <= extract_num(iid) <= end_num],
                                 key=extract_num,
                             )
                             if sc_in_range:
-                                st.warning(f"{len(sc_in_range)} rejected unit(s) in this range have samples collected and are NOT removed:")
+                                _show_warning(f"{len(sc_in_range)} rejected unit(s) in this range have samples collected and are NOT removed:")
                                 st.dataframe(pd.DataFrame({"Rejected – Samples Collected": sc_in_range}))
 
                             # ------------------------------------------------------------------
@@ -2022,7 +2099,7 @@ def main() -> None:
                                 }
 
                             except Exception as e:
-                                st.error(f"Failed to generate rack visualisation: {e}")
+                                _show_error(f"Failed to generate rack visualisation: {e}")
                     else:
                         # Single control number check
                         part = suffix_input
@@ -2035,13 +2112,13 @@ def main() -> None:
                         # Build the removal set
                         to_remove_set, samples_collected_set = process_unit_status_all(cleaned_us_df, prefix_input)
                         if control_id in samples_collected_set:
-                            st.warning(
+                            _show_warning(
                                 f"{control_id} is **Rejected** but samples were collected."
                             )
                         elif control_id in to_remove_set:
-                            st.success(f"{control_id} is classified as No Bleed, Sample Only, or Rejected.")
+                            _show_success(f"{control_id} is classified as No Bleed, Sample Only, or Rejected.")
                         else:
-                            st.error(f"{control_id} is not classified as No Bleed, Sample Only, or Rejected.")
+                            _show_error(f"{control_id} is not classified as No Bleed, Sample Only, or Rejected.")
                 except Exception as e:
                     st.exception(e)
 
@@ -2150,9 +2227,9 @@ def main() -> None:
                             _pb_date_map[_sid] = _d
                 st.session_state["pb_date_map"] = _pb_date_map
                 total_filled_pb = sum(1 for rids in pb_racks.values() for s in rids if s)
-                st.success(f"Built {len(pb_racks)} rack(s) with {total_filled_pb} samples.")
+                _show_success(f"Built {len(pb_racks)} rack(s) with {total_filled_pb} samples.")
             except Exception as e:
-                st.error(f"Failed to build racks: {e}")
+                _show_error(f"Failed to build racks: {e}")
 
         if "pb_racks" in st.session_state:
             pb_racks = st.session_state["pb_racks"]
@@ -2176,9 +2253,9 @@ def main() -> None:
                 if found_rack_idx is not None:
                     st.session_state["pb_current_rack"] = found_rack_idx
                     current_pb_idx = found_rack_idx
-                    st.success(f"{search_full_pb} → Rack {found_rack_idx + 1}")
+                    _show_success(f"{search_full_pb} → Rack {found_rack_idx + 1}")
                 else:
-                    st.warning(f"{search_full_pb} not found in any pre-built rack.")
+                    _show_warning(f"{search_full_pb} not found in any pre-built rack.")
 
             # Filter by pallet — quickly find racks containing a specific pallet
             if gs_df is not None:
@@ -2204,7 +2281,7 @@ def main() -> None:
                                 _matching_racks[ridx] = cnt
                                 _total_pallet_samples += cnt
                         if _matching_racks:
-                            st.info(
+                            _show_info(
                                 f"**{_total_pallet_samples}** sample(s) from Pallet {_pnum} "
                                 f"found across **{len(_matching_racks)}** rack(s)"
                             )
@@ -2222,7 +2299,7 @@ def main() -> None:
                                             current_pb_idx = ridx
                                             st.session_state["pb_current_rack"] = ridx
                         else:
-                            st.warning(
+                            _show_warning(
                                 f"No samples from Pallet {_pnum} found in any rack."
                             )
 
@@ -2278,7 +2355,7 @@ def main() -> None:
             pb_edit_mode = st.checkbox("Edit positions", key="pb_edit_mode", value=False)
 
             if pb_edit_mode:
-                st.caption(
+                _show_caption(
                     "Edit Sample IDs directly in the table. Clear a cell to leave "
                     "that position empty. Use **Apply Changes** to save edits, or "
                     "**Re-pack from next rack** to pull samples forward and fill gaps."
@@ -2317,7 +2394,7 @@ def main() -> None:
                             for ridx, rids in st.session_state["pb_racks"].items()
                             for sid in rids if sid
                         }
-                        st.success("Changes saved.")
+                        _show_success("Changes saved.")
                         st.rerun()
                 with btn_c2:
                     has_next_rack = current_pb_idx + 1 < len(pb_racks)
@@ -2345,13 +2422,13 @@ def main() -> None:
                             for ridx, rids in st.session_state["pb_racks"].items()
                             for sid in rids if sid
                         }
-                        st.success("Re-packed successfully.")
+                        _show_success("Re-packed successfully.")
                         st.rerun()
 
                 # Trim rack size — limit this rack to N samples, overflow → next rack
                 st.markdown("---")
                 st.markdown("**Set rack size**")
-                st.caption(
+                _show_caption(
                     "Limit this rack to a specific number of samples. "
                     "Any samples beyond that count are moved to the start of the next rack."
                 )
@@ -2401,7 +2478,7 @@ def main() -> None:
                         for ridx, rids in st.session_state["pb_racks"].items()
                         for sid in rids if sid
                     }
-                    st.success(
+                    _show_success(
                         f"Rack trimmed to {len(kept_trim)} samples. "
                         f"{len(overflow_trim)} sample(s) moved to Rack {current_pb_idx + 2}."
                     )
@@ -2523,7 +2600,7 @@ def main() -> None:
             _last_updated = _vi_prefix_state.get("last_updated", "unknown date")
             _info_col, _reset_col = st.columns([5, 1])
             with _info_col:
-                st.info(
+                _show_info(
                     f"Auto-detected start: **{_vi_auto_start}** "
                     f"— last complete group covered donations up to {_last_updated}"
                 )
@@ -2535,7 +2612,7 @@ def main() -> None:
                     st.session_state["vi_gist_state"] = _vi_gist_state
                     st.rerun()
         elif not _vi_gist_configured:
-            st.caption(
+            _show_caption(
                 "No saved state found for this prefix. "
                 "After generating a PDF the start position will be saved automatically."
             )
@@ -2550,14 +2627,14 @@ def main() -> None:
 
         if st.button("Generate Visual Inspection Labels PDF", key="btn_vi_labels"):
             if not vi_start_id:
-                st.error("Please enter a start donation ID.")
+                _show_error("Please enter a start donation ID.")
             else:
                 try:
                     vi_groups = build_vi_label_groups(
                         us_df, vi_prefix, vi_start_id, group_size=int(vi_group_size)
                     )
                     if not vi_groups:
-                        st.warning("No groups found from the specified start ID.")
+                        _show_warning("No groups found from the specified start ID.")
                     else:
                         # End date = last donation date in the file + 1 day
                         _all_dates = (
@@ -2594,17 +2671,17 @@ def main() -> None:
                             _saved_ok = _vi_gist_save(_vi_state)
                             st.session_state["vi_gist_state"] = _vi_state
                             if _saved_ok:
-                                st.success(
+                                _show_success(
                                     f"Generated {len(vi_groups)} label(s). "
                                     f"Next session will auto-start from the continuation point."
                                 )
                             else:
-                                st.warning(
+                                _show_warning(
                                     f"Generated {len(vi_groups)} label(s) but could not save state "
                                     f"(check GITHUB_TOKEN and GIST_ID in Streamlit secrets)."
                                 )
                         else:
-                            st.success(f"Generated {len(vi_groups)} label(s).")
+                            _show_success(f"Generated {len(vi_groups)} label(s).")
                         st.download_button(
                             label=f"⬇ Download PDF ({len(vi_groups)} label pages)",
                             data=vi_pdf,
@@ -2637,9 +2714,9 @@ def main() -> None:
                             })
                         st.table(pd.DataFrame(_prev))
                 except ImportError as _e:
-                    st.error(str(_e))
+                    _show_error(str(_e))
                 except ValueError as _e:
-                    st.error(str(_e))
+                    _show_error(str(_e))
                 except Exception as _e:
                     st.exception(_e)
 
@@ -2690,12 +2767,12 @@ def main() -> None:
 
                         _df = parse_qc_report_pdf(qc_pdf_file)
                         if _df.empty:
-                            st.warning(f"No records found in **{qc_pdf_file.name}**.")
+                            _show_warning(f"No records found in **{qc_pdf_file.name}**.")
                         else:
                             all_frames.append(_df)
 
                     if not all_frames:
-                        st.warning(
+                        _show_warning(
                             "No records were found in any of the uploaded PDFs. "
                             "Enable **Show debug info** and click Extract Data again "
                             "to see what pdfplumber is reading from these files."
@@ -2705,19 +2782,19 @@ def main() -> None:
                         qc_df = pd.concat(all_frames, ignore_index=True).drop_duplicates()
                         st.session_state["qc_extracted_df"] = qc_df
                         if len(qc_pdf_files) > 1:
-                            st.info(
+                            _show_info(
                                 f"Combined {len(qc_pdf_files)} file(s): "
                                 f"{sum(len(f) for f in all_frames)} total rows → "
                                 f"{len(qc_df)} after deduplication."
                             )
                 except ImportError as _ie:
-                    st.error(str(_ie))
+                    _show_error(str(_ie))
                 except Exception as _pe:
                     st.exception(_pe)
 
         if "qc_extracted_df" in st.session_state:
             qc_result = st.session_state["qc_extracted_df"]
-            st.success(f"Extracted {len(qc_result)} donation record(s).")
+            _show_success(f"Extracted {len(qc_result)} donation record(s).")
             st.dataframe(qc_result, use_container_width=True)
             csv_bytes = qc_result.to_csv(index=False).encode("utf-8")
             st.download_button(
@@ -2734,7 +2811,7 @@ def main() -> None:
             st.markdown("---")
             st.subheader("Release Comparison by Date")
             if us_df is None:
-                st.info(
+                _show_info(
                     "Upload a **unit status file** (above) to compare QC releases "
                     "against your unit status data."
                 )
@@ -2747,7 +2824,7 @@ def main() -> None:
                         st.session_state["qc_comparison_df"] = cmp_df
                         st.session_state["qc_comparison_detail"] = cmp_detail
                     except ValueError as _ve:
-                        st.error(str(_ve))
+                        _show_error(str(_ve))
                     except Exception as _ce:
                         st.exception(_ce)
 
@@ -2815,7 +2892,7 @@ def main() -> None:
                                             use_container_width=True,
                                         )
                                     else:
-                                        st.caption("None")
+                                        _show_caption("None")
                                 with _exp_c2:
                                     st.markdown("**Still to pack**")
                                     if _still_list:
@@ -2825,7 +2902,7 @@ def main() -> None:
                                             use_container_width=True,
                                         )
                                     else:
-                                        st.caption("All packed!")
+                                        _show_caption("All packed!")
 
                     cmp_csv = cmp.to_csv(index=False).encode("utf-8")
                     st.download_button(
@@ -2837,7 +2914,7 @@ def main() -> None:
                     )
 
     if nav_section in ["Manual racks/Unit Status Check", "Pre-built Rack Browser", "Visual Inspection Labels"] and us_df is None:
-        st.info("Please upload a unit status file to use this section.")
+        _show_info("Please upload a unit status file to use this section.")
 
     # =========================================================================
     # Master Sheet Ejaculator
@@ -2898,28 +2975,28 @@ def main() -> None:
                         _ms_qc_frames.append(_qdf)
                 if _ms_qc_frames:
                     _qc_df_ms = pd.concat(_ms_qc_frames, ignore_index=True).drop_duplicates()
-                    st.success(f"QC data loaded from uploaded PDF(s): {len(_qc_df_ms)} unit record(s).")
+                    _show_success(f"QC data loaded from uploaded PDF(s): {len(_qc_df_ms)} unit record(s).")
             except ImportError:
-                st.warning("pdfplumber is not installed — QC PDF cannot be parsed. Column (c) will be 0.")
+                _show_warning("pdfplumber is not installed — QC PDF cannot be parsed. Column (c) will be 0.")
             except Exception as _qe:
-                st.error(f"Failed to parse QC PDF: {_qe}")
+                _show_error(f"Failed to parse QC PDF: {_qe}")
 
         # Fall back to QC data extracted in the QC Report PDF Extractor section
         if _qc_df_ms is None and "qc_extracted_df" in st.session_state:
             _qc_df_ms = st.session_state["qc_extracted_df"]
-            st.info("Using QC data from the QC Report PDF Extractor section.")
+            _show_info("Using QC data from the QC Report PDF Extractor section.")
 
         if _ms_file is None:
-            st.info("Please upload the Master Sheet CSV to begin.")
+            _show_info("Please upload the Master Sheet CSV to begin.")
         else:
             try:
                 _ms_data = parse_master_sheet(_ms_file)
             except Exception as _mse:
-                st.error(f"Failed to parse master sheet: {_mse}")
+                _show_error(f"Failed to parse master sheet: {_mse}")
                 _ms_data = {}
 
             if not _ms_data:
-                st.error(
+                _show_error(
                     "Could not find any freezer sections in the master sheet. "
                     "Ensure the CSV contains rows beginning with 'Freezer ID:'."
                 )
@@ -2941,7 +3018,7 @@ def main() -> None:
                 _ms_dates = _fd["dates"]
 
                 if not _ms_dates:
-                    st.error("No dates found in the master sheet for the selected freezer.")
+                    _show_error("No dates found in the master sheet for the selected freezer.")
                 else:
                     # Date selection — default to today if present
                     _today_str = datetime.date.today().strftime("%d.%m.%Y")
@@ -3017,7 +3094,7 @@ def main() -> None:
                     with st.expander(
                         "Column (b) — Plasma units packed for the shipment #", expanded=True
                     ):
-                        st.caption(_col_b_auto_note)
+                        _show_caption(_col_b_auto_note)
                         _ms_manual_b = st.checkbox(
                             "Enter manually instead",
                             value=False,
@@ -3246,7 +3323,7 @@ def main() -> None:
                                 except (UnicodeDecodeError, Exception):
                                     continue
                             if _raw_ms is None:
-                                st.error("Failed to re-read master sheet for writing.")
+                                _show_error("Failed to re-read master sheet for writing.")
                                 raise RuntimeError("Encoding error on re-read.")
 
                             # Locate column index for the selected date
@@ -3258,7 +3335,7 @@ def main() -> None:
                                     break
 
                             if _ms_col_idx is None:
-                                st.error(
+                                _show_error(
                                     f"Date {_sel_date_str} not found in master sheet headers. "
                                     "The date may be outside the range of this CSV."
                                 )
@@ -3293,7 +3370,7 @@ def main() -> None:
                                 _updated_csv = _raw_ms.to_csv(
                                     index=False, header=False
                                 ).encode("utf-8")
-                                st.success(
+                                _show_success(
                                     f"Values for {_sel_date_str} ({_sel_freezer}) applied. "
                                     "Download the updated file below."
                                 )
@@ -3306,27 +3383,310 @@ def main() -> None:
                                 )
                                 if _sb_client:
                                     if st.button(
-                                        "💾  Save updated Master Sheet to storage",
+                                        "Save updated Master Sheet to storage",
                                         key="ms_sb_save_updated",
                                         help="Overwrites master-sheet/master_sheet.csv in Supabase",
                                     ):
-                                        if _sb_upload(
+                                        _ms_save_result = _sb_upload(
                                             _sb_client,
                                             "master-sheet/master_sheet.csv",
                                             _updated_csv,
                                             "text/csv",
-                                        ):
-                                            st.success(
+                                        )
+                                        if _ms_save_result is True:
+                                            _show_success(
                                                 "Master sheet saved to Supabase storage as "
                                                 "**master_sheet.csv**."
                                             )
-                                            # Invalidate the file listing cache so the
-                                            # updated file appears immediately in the picker
                                             st.session_state.pop("_sb_ls_ms_master_file", None)
                                         else:
-                                            st.error("Failed to save to Supabase.")
+                                            _show_error(f"Failed to save to Supabase: {_ms_save_result}")
                         except Exception as _ms_apply_err:
                             st.exception(_ms_apply_err)
+
+    # =========================================================================
+    # Storage Manager
+    # =========================================================================
+    if nav_section == "Storage Manager":
+        st.subheader("Storage Manager")
+
+        if _sb_client is None:
+            _show_warning("Supabase is not connected. Configure SUPABASE_URL and SUPABASE_KEY in secrets.toml to use this section.")
+        else:
+            _sm_folders = {
+                "Unit Status (2026)": ("unit-status", ["csv", "xlsx", "xls"]),
+                "Grifols Shipment": ("shipment", ["csv", "xlsx", "xls"]),
+                "Master Sheet": ("master-sheet", ["csv"]),
+            }
+
+            def _sm_file_mime(fname: str) -> str:
+                if fname.endswith(".xlsx"):
+                    return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                if fname.endswith(".xls"):
+                    return "application/vnd.ms-excel"
+                return "text/csv"
+
+            def _sm_load_df(raw: bytes, fname: str) -> Optional[pd.DataFrame]:
+                import io as _io_sm
+                _f = _io_sm.BytesIO(raw)
+                try:
+                    if fname.endswith((".xlsx", ".xls")):
+                        return pd.read_excel(_f, dtype=str).fillna("")
+                    for _enc in ("utf-8", "utf-8-sig", "cp1252", "latin-1"):
+                        try:
+                            _f.seek(0)
+                            return pd.read_csv(_f, dtype=str, encoding=_enc).fillna("")
+                        except UnicodeDecodeError:
+                            continue
+                except Exception:
+                    pass
+                return None
+
+            def _sm_df_to_csv_bytes(df: pd.DataFrame) -> bytes:
+                return df.to_csv(index=False).encode("utf-8")
+
+            for _sm_label, (_sm_folder, _sm_types) in _sm_folders.items():
+                st.markdown(f"### {_sm_label}")
+                _sm_ls_key = f"_sm_ls_{_sm_folder}"
+                if _sm_ls_key not in st.session_state:
+                    st.session_state[_sm_ls_key] = _sb_list_files(_sb_client, _sm_folder)
+                _sm_files = st.session_state[_sm_ls_key]
+
+                if _sm_files:
+                    for _sm_fname in _sm_files:
+                        _sm_col1, _sm_col2, _sm_col3 = st.columns([4, 1, 1])
+                        _sm_col1.write(_sm_fname)
+
+                        # Replace button
+                        _sm_replace_file = _sm_col2.file_uploader(
+                            "Replace",
+                            type=_sm_types,
+                            key=f"_sm_replace_{_sm_folder}_{_sm_fname}",
+                            label_visibility="collapsed",
+                        )
+                        if _sm_replace_file is not None:
+                            _sm_replace_file.seek(0)
+                            _sm_res = _sb_upload(
+                                _sb_client,
+                                f"{_sm_folder}/{_sm_fname}",
+                                _sm_replace_file.read(),
+                                _sm_file_mime(_sm_replace_file.name),
+                            )
+                            if _sm_res is True:
+                                _show_success(f"Replaced **{_sm_fname}** successfully.")
+                                st.session_state[_sm_ls_key] = _sb_list_files(_sb_client, _sm_folder)
+                                for _k in list(st.session_state.keys()):
+                                    if _sm_folder.replace("-", "_") in _k and "_sb_ln_" in _k:
+                                        st.session_state.pop(_k, None)
+                                st.rerun()
+                            else:
+                                _show_error(f"Replace failed: {_sm_res}")
+
+                        # Delete button
+                        if _sm_col3.button("Delete", key=f"_sm_del_{_sm_folder}_{_sm_fname}"):
+                            _sm_del_res = _sb_delete(_sb_client, f"{_sm_folder}/{_sm_fname}")
+                            if _sm_del_res is True:
+                                _show_success(f"Deleted **{_sm_fname}**.")
+                                st.session_state[_sm_ls_key] = _sb_list_files(_sb_client, _sm_folder)
+                                for _k in list(st.session_state.keys()):
+                                    if _sm_folder.replace("-", "_") in _k and "_sb_ln_" in _k:
+                                        st.session_state.pop(_k, None)
+                                st.rerun()
+                            else:
+                                _show_error(f"Delete failed: {_sm_del_res}")
+                else:
+                    _show_caption(f"No files stored in `{_sm_folder}/` yet.")
+
+                # Upload new file to this folder
+                with st.expander(f"Upload new file to {_sm_label}"):
+                    _sm_new_file = st.file_uploader(
+                        "Choose file", type=_sm_types, key=f"_sm_new_{_sm_folder}"
+                    )
+                    if _sm_new_file is not None:
+                        if st.button("Save to storage", key=f"_sm_new_save_{_sm_folder}"):
+                            _sm_new_file.seek(0)
+                            _sm_new_res = _sb_upload(
+                                _sb_client,
+                                f"{_sm_folder}/{_sm_new_file.name}",
+                                _sm_new_file.read(),
+                                _sm_file_mime(_sm_new_file.name),
+                            )
+                            if _sm_new_res is True:
+                                _show_success(f"Saved **{_sm_new_file.name}** to storage.")
+                                st.session_state[_sm_ls_key] = _sb_list_files(_sb_client, _sm_folder)
+                                st.rerun()
+                            else:
+                                _show_error(f"Upload failed: {_sm_new_res}")
+
+                # ── Unit Status row editing ──────────────────────────────────
+                if _sm_folder == "unit-status" and _sm_files:
+                    with st.expander("Edit Rows in Unit Status File"):
+                        _us_edit_sel = st.selectbox(
+                            "Select file to edit",
+                            _sm_files,
+                            key="_sm_us_edit_sel",
+                        )
+                        _us_df_key = f"_sm_us_df_{_us_edit_sel}"
+
+                        # Auto-load when selection changes or not yet loaded
+                        if _us_df_key not in st.session_state:
+                            _us_raw = _sb_download(_sb_client, f"unit-status/{_us_edit_sel}")
+                            if _us_raw:
+                                _loaded = _sm_load_df(_us_raw, _us_edit_sel)
+                                if _loaded is not None:
+                                    st.session_state[_us_df_key] = _loaded
+                                else:
+                                    _show_error("Could not parse the selected file.")
+                            else:
+                                _show_error("Could not download the selected file from storage.")
+
+                        if _us_df_key in st.session_state:
+                            _us_df_edit: pd.DataFrame = st.session_state[_us_df_key]
+                            _us_cols = list(_us_df_edit.columns)
+                            _show_caption(f"{len(_us_df_edit)} rows · {len(_us_cols)} columns")
+
+                            _tab_add, _tab_find = st.tabs(["Add Rows", "Find & Edit Row"])
+
+                            # ── Add Rows (paste) ─────────────────────────────
+                            with _tab_add:
+                                _show_caption(
+                                    f"Paste rows copied from Excel. Expected column order: "
+                                    f"`{'  |  '.join(_us_cols)}`"
+                                )
+                                _paste_text = st.text_area(
+                                    "Paste rows here (tab-separated, no header)",
+                                    height=200,
+                                    key="_sm_paste_rows",
+                                    placeholder="F26-000001\t10057852\tQ\t02.01.2026\t1\tQuarantine\t\t\tTO BE SHIPPED ON 05.01.2026",
+                                )
+                                if st.button("Preview & Append", key="_sm_paste_preview_btn"):
+                                    if not _paste_text.strip():
+                                        _show_warning("Nothing pasted.")
+                                    else:
+                                        import io as _io_paste
+                                        try:
+                                            _pasted_df = pd.read_csv(
+                                                _io_paste.StringIO(_paste_text.strip()),
+                                                sep="\t",
+                                                header=None,
+                                                dtype=str,
+                                            ).fillna("")
+                                            _n_pasted_cols = _pasted_df.shape[1]
+                                            _n_expected = len(_us_cols)
+                                            if _n_pasted_cols != _n_expected:
+                                                _show_warning(
+                                                    f"Pasted data has {_n_pasted_cols} columns "
+                                                    f"but file has {_n_expected}. "
+                                                    "Extra columns will be dropped; missing ones filled blank."
+                                                )
+                                            # Align columns
+                                            _pasted_df.columns = (
+                                                _us_cols[:_n_pasted_cols]
+                                                + [f"_extra_{i}" for i in range(max(0, _n_pasted_cols - _n_expected))]
+                                            )
+                                            for _mc in _us_cols:
+                                                if _mc not in _pasted_df.columns:
+                                                    _pasted_df[_mc] = ""
+                                            _pasted_df = _pasted_df[_us_cols]
+                                            st.session_state["_sm_paste_preview"] = _pasted_df
+                                        except Exception as _pe:
+                                            _show_error(f"Could not parse pasted text: {_pe}")
+
+                                if "_sm_paste_preview" in st.session_state:
+                                    _preview_df = st.session_state["_sm_paste_preview"]
+                                    st.write(f"**{len(_preview_df)} row(s) to append:**")
+                                    st.dataframe(_preview_df, use_container_width=True)
+                                    if st.button("Confirm — Append to file", key="_sm_paste_confirm_btn"):
+                                        _updated_us = pd.concat(
+                                            [_us_df_edit, _preview_df], ignore_index=True
+                                        )
+                                        _save_res = _sb_upload(
+                                            _sb_client,
+                                            f"unit-status/{_us_edit_sel}",
+                                            _sm_df_to_csv_bytes(_updated_us),
+                                            "text/csv",
+                                        )
+                                        if _save_res is True:
+                                            st.session_state[_us_df_key] = _updated_us
+                                            st.session_state.pop("_sm_paste_preview", None)
+                                            _show_success(
+                                                f"{len(_preview_df)} row(s) appended. "
+                                                f"File now has {len(_updated_us)} rows."
+                                            )
+                                            st.rerun()
+                                        else:
+                                            _show_error(f"Save failed: {_save_res}")
+
+                            # ── Find & Edit Row ──────────────────────────────
+                            with _tab_find:
+                                _ctrl_q = st.text_input(
+                                    "Control number (Donation # suffix, e.g. 002035)",
+                                    key="_sm_ctrl_q",
+                                    placeholder="002035",
+                                )
+                                if st.button("Search", key="_sm_ctrl_search_btn"):
+                                    if not _ctrl_q.strip():
+                                        _show_warning("Enter a control number to search.")
+                                    elif "Donation #" not in _us_cols:
+                                        _show_warning("Column 'Donation #' not found in this file.")
+                                    else:
+                                        _q = _ctrl_q.strip()
+                                        _mask = (
+                                            _us_df_edit["Donation #"]
+                                            .astype(str)
+                                            .str.strip()
+                                            .str.endswith(_q)
+                                        )
+                                        _found_idx = _us_df_edit.index[_mask].tolist()
+                                        st.session_state["_sm_found_idx"] = _found_idx
+                                        st.session_state["_sm_found_key"] = _us_df_key
+                                        if not _found_idx:
+                                            _show_info(f"No rows found where Donation # ends with '{_q}'.")
+
+                                _found = st.session_state.get("_sm_found_idx", [])
+                                _found_key = st.session_state.get("_sm_found_key", "")
+                                # Clear results if user switched to a different file
+                                if _found_key != _us_df_key:
+                                    _found = []
+
+                                for _fi, _fidx in enumerate(_found):
+                                    if _fidx not in _us_df_edit.index:
+                                        continue
+                                    st.markdown(f"**Match {_fi + 1}** — row index {_fidx}")
+                                    with st.form(f"_sm_edit_form_{_fi}_{_fidx}"):
+                                        _edit_vals: Dict[str, str] = {}
+                                        _ec_left = _us_cols[: len(_us_cols) // 2 + len(_us_cols) % 2]
+                                        _ec_right = _us_cols[len(_us_cols) // 2 + len(_us_cols) % 2 :]
+                                        _ef_left, _ef_right = st.columns(2)
+                                        for _col in _ec_left:
+                                            _edit_vals[_col] = _ef_left.text_input(
+                                                _col,
+                                                value=str(_us_df_edit.at[_fidx, _col]),
+                                                key=f"_sm_ef_{_fi}_{_fidx}_{_col}",
+                                            )
+                                        for _col in _ec_right:
+                                            _edit_vals[_col] = _ef_right.text_input(
+                                                _col,
+                                                value=str(_us_df_edit.at[_fidx, _col]),
+                                                key=f"_sm_ef_{_fi}_{_fidx}_{_col}",
+                                            )
+                                        if st.form_submit_button("Save Changes"):
+                                            for _col in _us_cols:
+                                                _us_df_edit.at[_fidx, _col] = _edit_vals[_col]
+                                            _save_res = _sb_upload(
+                                                _sb_client,
+                                                f"unit-status/{_us_edit_sel}",
+                                                _sm_df_to_csv_bytes(_us_df_edit),
+                                                "text/csv",
+                                            )
+                                            if _save_res is True:
+                                                st.session_state[_us_df_key] = _us_df_edit
+                                                _show_success("Changes saved.")
+                                                st.rerun()
+                                            else:
+                                                _show_error(f"Save failed: {_save_res}")
+
+                st.markdown("---")
 
 
 if __name__ == "__main__":

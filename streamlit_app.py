@@ -68,7 +68,7 @@ FEATURES: Dict[str, bool] = {
     "Pre-built Rack Browser": True,
     "Visual Inspection Labels": True,
     "QC Report PDF Extractor": False,
-    "Master Sheet Ejaculator": True,
+    "Master Sheet ": True,
     "Storage Manager": True,
 }
 
@@ -85,29 +85,36 @@ def _verbose() -> bool:
     return st.session_state.get("_verbose", VERBOSE_DEFAULT)
 
 
-def _show_success(msg: str) -> None:
+def _show_success(msg: str, **kwargs) -> None:
     if _verbose():
-        st.success(msg)
+        st.success(msg, **kwargs)
 
 
-def _show_error(msg: str) -> None:
+def _show_error(msg: str, **kwargs) -> None:
     if _verbose():
-        st.error(msg)
+        st.error(msg, **kwargs)
 
 
-def _show_warning(msg: str) -> None:
+def _show_warning(msg: str, **kwargs) -> None:
     if _verbose():
-        st.warning(msg)
+        st.warning(msg, **kwargs)
 
 
-def _show_info(msg: str) -> None:
+def _show_info(msg: str, **kwargs) -> None:
     if _verbose():
-        st.info(msg)
+        st.info(msg, **kwargs)
 
 
-def _show_caption(msg: str) -> None:
+def _show_caption(msg: str, **kwargs) -> None:
     if _verbose():
-        st.caption(msg)
+        st.caption(msg, **kwargs)
+
+
+def _subheader(title: str) -> None:
+    st.markdown(
+        f'<div class="gf-section-header"><span>{title}</span></div>',
+        unsafe_allow_html=True,
+    )
 
 
 def clean_unit_status(us_df: pd.DataFrame) -> pd.DataFrame:
@@ -670,10 +677,9 @@ def build_rack_html(
 <style>
   .rack-wrap {{
     padding: 12px 12px 14px 12px;
-    border: 1px solid rgba(0,0,0,0.10);
+    border: 1px solid #30363d;
     border-radius: 12px;
-    background: rgba(255,255,255,0.70);
-    backdrop-filter: blur(4px);
+    background: #0d1117;
     width: fit-content;
     max-width: 100%;
     overflow-x: auto;
@@ -683,6 +689,7 @@ def build_rack_html(
     font-weight: 700;
     font-size: 16px;
     margin: 0 0 8px 0;
+    color: #e6edf3;
   }}
 
   .rack-legend {{
@@ -690,7 +697,7 @@ def build_rack_html(
     gap: 14px;
     align-items: center;
     font-size: 12px;
-    opacity: 0.85;
+    color: #c9d1d9;
     margin-bottom: 10px;
     flex-wrap: wrap;
   }}
@@ -698,14 +705,14 @@ def build_rack_html(
   .rack-date-range {{
     margin-left: auto;
     font-size: 12px;
-    opacity: 0.75;
+    opacity: 0.65;
     white-space: nowrap;
     font-style: italic;
   }}
 
   .legend-item {{
     display: inline-flex;
-    gap: 12px;
+    gap: 6px;
     align-items: center;
   }}
 
@@ -713,19 +720,19 @@ def build_rack_html(
     width: 12px;
     height: 12px;
     border-radius: 4px;
-    border: 1px solid rgba(0,0,0,0.15);
+    border: 1px solid rgba(255,255,255,0.15);
     display: inline-block;
   }}
-  .swatch.present {{ background: #e6f4ea; }}
-  .swatch.not-manifest {{ background: #ffd966; }}
-  .swatch.samples-collected {{ background: #ffb3b3; }}
-  .swatch.blank {{ background: #f3f4f6; }}
-  .swatch.pallet-1 {{ background: #8ecae6; }}
-  .swatch.pallet-2 {{ background: #c77dff; }}
-  .swatch.pallet-3 {{ background: #76d9a3; }}
-  .swatch.pallet-4 {{ background: #ff9f40; }}
-  .swatch.pallet-5 {{ background: #ff6b9d; }}
-  .swatch.pallet-6 {{ background: #ffdd44; }}
+  .swatch.present          {{ background: #238636; }}
+  .swatch.not-manifest     {{ background: #c9960c; }}
+  .swatch.samples-collected{{ background: #e5534b; }}
+  .swatch.blank            {{ background: #21262d; }}
+  .swatch.pallet-1         {{ background: #1f6feb; }}
+  .swatch.pallet-2         {{ background: #8957e5; }}
+  .swatch.pallet-3         {{ background: #2ea043; }}
+  .swatch.pallet-4         {{ background: #e3b341; }}
+  .swatch.pallet-5         {{ background: #db61a2; }}
+  .swatch.pallet-6         {{ background: #d29922; }}
 
   /* TRUE 18-column grid (no spacer columns) */
   .rack-grid {{
@@ -743,7 +750,7 @@ def build_rack_html(
     align-items: center;
     justify-content: center;
     border-radius: 8px;
-    border: 1px solid rgba(0,0,0,0.12);
+    border: 1px solid rgba(255,255,255,0.08);
     font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
     font-weight: 700;
     font-size: 14px;
@@ -754,30 +761,30 @@ def build_rack_html(
   }}
 
   .rack-cell.present {{
-    background: #e6f4ea;
-    color: rgba(0,0,0,0.72);
+    background: #1c3d2e;
+    color: #3fb950;
   }}
 
   .rack-cell.not-manifest {{
-    background: #ffd966;
-    color: rgba(0,0,0,0.80);
+    background: #3d2b00;
+    color: #f0b429;
   }}
 
   .rack-cell.samples-collected {{
-    background: #ffb3b3;
-    color: rgba(0,0,0,0.80);
+    background: #3d1a1a;
+    color: #e5534b;
   }}
 
-  .rack-cell.pallet-1 {{ background: #8ecae6; color: rgba(0,0,0,0.80); }}
-  .rack-cell.pallet-2 {{ background: #c77dff; color: rgba(0,0,0,0.80); }}
-  .rack-cell.pallet-3 {{ background: #76d9a3; color: rgba(0,0,0,0.80); }}
-  .rack-cell.pallet-4 {{ background: #ff9f40; color: rgba(0,0,0,0.80); }}
-  .rack-cell.pallet-5 {{ background: #ff6b9d; color: rgba(0,0,0,0.80); }}
-  .rack-cell.pallet-6 {{ background: #ffdd44; color: rgba(0,0,0,0.80); }}
+  .rack-cell.pallet-1 {{ background: #0d2d45; color: #58a6ff; }}
+  .rack-cell.pallet-2 {{ background: #2d1f4a; color: #bc8cff; }}
+  .rack-cell.pallet-3 {{ background: #0d3d2a; color: #56d364; }}
+  .rack-cell.pallet-4 {{ background: #3d2000; color: #e3b341; }}
+  .rack-cell.pallet-5 {{ background: #3d0d2a; color: #f778ba; }}
+  .rack-cell.pallet-6 {{ background: #3a3200; color: #d4c500; }}
 
   .rack-cell.blank {{
-    background: #f3f4f6;
-    color: rgba(0,0,0,0.28);
+    background: #161b22;
+    color: #3d444d;
     font-weight: 600;
   }}
 
@@ -789,7 +796,7 @@ def build_rack_html(
     right: 4px;
     top: 50%;
     height: 2px;
-    background: rgba(0, 0, 0, 0.65);
+    background: rgba(255, 255, 255, 0.65);
     transform: translateY(-50%);
     pointer-events: none;
     border-radius: 1px;
@@ -797,7 +804,7 @@ def build_rack_html(
 
   /* Legend swatch for packed */
   .swatch.packed-swatch {{
-    background: #d0d0d0;
+    background: #30363d;
     position: relative;
   }}
   .swatch.packed-swatch::after {{
@@ -807,27 +814,26 @@ def build_rack_html(
     right: 0;
     top: 50%;
     height: 2px;
-    background: rgba(0, 0, 0, 0.65);
+    background: rgba(255, 255, 255, 0.65);
     transform: translateY(-50%);
     border-radius: 1px;
   }}
 
-  /* Visible separators after col 6 and col 12 (right edge of those cells) */
+  /* Visible separators after col 6 and col 12 */
   .rack-grid > .rack-cell:nth-child(18n + 6),
   .rack-grid > .rack-cell:nth-child(18n + 12) {{
-    box-shadow: inset -2px 0 0 blue;
+    box-shadow: inset -2px 0 0 #3b82f6;
   }}
 
-  /* Optional: also mark the left edge of col 7 and col 13 to make a "double line" */
   .rack-grid > .rack-cell:nth-child(18n + 7),
   .rack-grid > .rack-cell:nth-child(18n + 13) {{
-    box-shadow: inset 2px 0 0 blue;
+    box-shadow: inset 2px 0 0 #3b82f6;
   }}
 
-  /* Hover: use filter instead of box-shadow so we don't overwrite separator shadows */
+  /* Hover */
   .rack-cell:hover {{
     transform: translateY(-1px);
-    filter: drop-shadow(0 4px 8px rgba(0,0,0,0.18));
+    filter: drop-shadow(0 4px 8px rgba(0,0,0,0.40));
   }}
 </style>
 """
@@ -1699,14 +1705,59 @@ def main() -> None:
     resulting reports and data tables.  It covers both the pallet packing
     report and the unit status analysis.
     """
-    st.set_page_config(page_title="Grifols Combined Reports", layout="wide")
-    st.title("Grifols Combined Reports")
-    st.write(
-        "Upload your **Grifols shipment CSV** and optionally a **unit status CSV**. "
-        "Then select the pallet number you wish to inspect and choose whether to "
-        "display detailed lists of sample IDs.  If a unit status file is uploaded, "
-        "you can also analyse donations on a specific prefix and control number(s)."
-    )
+    st.set_page_config(page_title="Grifols", layout="wide", page_icon=None, initial_sidebar_state="expanded")
+
+    st.markdown("""
+<style>
+:root {
+    --accent:    #3b82f6;
+    --accent-bg: rgba(59,130,246,0.15);
+    --accent-hi: #93c5fd;
+    --bg-card:   #161b22;
+    --border:    #30363d;
+    --text:      #e6edf3;
+    --text-dim:  #8b949e;
+}
+
+/* ── Layout ──────────────────────────────────────────── */
+.main .block-container { padding-top: 1rem; padding-bottom: 2rem; max-width: 1300px; }
+
+/* ── Hide Streamlit chrome ───────────────────────────── */
+#MainMenu, footer { visibility: hidden; }
+header { visibility: visible; }
+
+/* ── Custom title bar ────────────────────────────────── */
+.gf-title-bar {
+    display: flex; align-items: center; gap: 12px;
+    padding: 0.4rem 0 0.9rem;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 1.25rem;
+}
+.gf-title-accent { width: 4px; height: 28px; background: var(--accent); border-radius: 2px; flex-shrink: 0; }
+.gf-title-text { font-size: 1.3rem; font-weight: 800; color: #e6edf3; letter-spacing: -0.03em; line-height: 1; }
+.gf-title-sub { font-size: 0.7rem; color: var(--text-dim); margin-top: 3px; letter-spacing: 0.02em; }
+
+/* ── Section headers ─────────────────────────────────── */
+.gf-section-header {
+    margin: 0.25rem 0 1rem;
+    padding: 0.45rem 0.75rem;
+    background: var(--bg-card);
+    border-left: 3px solid var(--accent);
+    border-radius: 0 5px 5px 0;
+}
+.gf-section-header span { font-size: 1rem; font-weight: 700; color: #e6edf3; letter-spacing: -0.01em; }
+</style>
+""", unsafe_allow_html=True)
+
+    st.markdown("""
+<div class="gf-title-bar">
+  <div class="gf-title-accent"></div>
+  <div>
+    <div class="gf-title-text">Grifols</div>
+    <div class="gf-title-sub">Winnipeg — Operations</div>
+  </div>
+</div>
+""", unsafe_allow_html=True)
 
     # Initialise Supabase once per session (None when secrets are not configured)
     if "_sb_client_cache" not in st.session_state:
@@ -1714,11 +1765,6 @@ def main() -> None:
         st.session_state["_sb_client_error"] = _get_supabase_error()
     _sb_client = st.session_state["_sb_client_cache"]
     _sb_error = st.session_state.get("_sb_client_error")
-
-    if _sb_client:
-        _show_caption("Connected to Supabase storage.")
-    elif _sb_error:
-        _show_warning(f"Supabase not connected:{_sb_error}")
 
     shipment_file = _sb_file_widget(
         "Upload Grifols shipment file",
@@ -1793,9 +1839,8 @@ def main() -> None:
                 _uc1, _uc2 = st.columns([0.97, 0.03])
                 with _uc1:
                     _show_error(
-                        f"🚨 **DUPLICATE DONATION #s DETECTED in unit status file** — {len(_us_dupes)} duplicate(s):\n\n"
+                        f"**DUPLICATE DONATION #s DETECTED in unit status file** — {len(_us_dupes)} duplicate(s):\n\n"
                         + ", ".join(str(x) for x in sorted(_us_dupes)),
-                        icon="🚨",
                     )
                 with _uc2:
                     st.write("")
@@ -1829,7 +1874,7 @@ def main() -> None:
         "Pre-built Rack Browser",
         "Visual Inspection Labels",
         "QC Report PDF Extractor",
-        "Master Sheet Ejaculator",
+        "Master Sheet ",
         "Storage Manager",
     ]
     _visible_sections = (
@@ -1847,6 +1892,10 @@ def main() -> None:
             value=st.session_state.get("_verbose", VERBOSE_DEFAULT),
             key="_verbose",
         )
+        if _sb_client:
+            _show_caption("Storage: connected")
+        elif _sb_error:
+            _show_caption(f"Storage: {_sb_error}")
         st.markdown("---")
         nav_section = st.radio(
             "Go to section",
@@ -1866,7 +1915,7 @@ def main() -> None:
 
     # Display shipment DataFrame preview and generate pallet report
     if nav_section == "Pallet Report" and gs_df is not None:
-        st.subheader("Shipment Data Preview")
+        _subheader("Shipment Data Preview")
         st.write(
             "Below is a preview of the shipment DataFrame (first 5 rows). "
             "Ensure the columns include at least 'Sample ID', 'Comments' and 'Samples Packed?'."
@@ -1874,7 +1923,7 @@ def main() -> None:
         st.dataframe(gs_df.head())
         # Optionally show a preview of the unit status file if uploaded
         if us_df is not None:
-            st.subheader("Unit Status Data Preview")
+            _subheader("Unit Status Data Preview")
             st.write("First 5 rows of the unit status DataFrame after cleaning:")
             cleaned_us_df_preview = clean_unit_status(us_df)
             st.dataframe(cleaned_us_df_preview.head())
@@ -1911,7 +1960,7 @@ def main() -> None:
         # Display the last generated pallet report if available
         if "pallet_report_text" in st.session_state:
             last_no = st.session_state.get("pallet_no_last", pallet_no)
-            st.subheader(f"Pallet Report (Pallet {last_no})")
+            _subheader(f"Pallet Report (Pallet {last_no})")
 
         # ---- BEAUTIFUL OUTPUT (no logic changes; just parsing the existing report_text) ----
         if "pallet_report_text" in st.session_state:
@@ -1975,7 +2024,7 @@ def main() -> None:
 
     # If unit status CSV is loaded, provide inputs and allow control number checks
     if nav_section == "Manual racks/Unit Status Check" and us_df is not None:
-        st.subheader("Manual racks/Unit Status Check")
+        _subheader("Manual racks/Unit Status Check")
 
         prefix_input = st.text_input(
             "Donation prefix", value="F26-", max_chars=20
@@ -2156,7 +2205,7 @@ def main() -> None:
             st.markdown(_rack_html, unsafe_allow_html=True)
 
     if nav_section == "Pre-built Rack Browser" and us_df is not None:
-        st.subheader("Pre-built Rack Browser")
+        _subheader("Pre-built Rack Browser")
         st.write(
             "Automatically builds sequential racks of 216 samples from the unit "
             "status file. Search for any unit ID to jump straight to its rack. "
@@ -2532,7 +2581,7 @@ def main() -> None:
             st.markdown(rack_html_pb, unsafe_allow_html=True)
 
     if nav_section == "Visual Inspection Labels" and us_df is not None:
-        st.subheader("Visual Inspection Labels")
+        _subheader("Visual Inspection Labels")
         st.write(
             "Groups Quarantine units into batches of N and generates a printable "
             "PDF.  Each page has two different labels (top and bottom half). "
@@ -2721,7 +2770,7 @@ def main() -> None:
                     st.exception(_e)
 
     if nav_section == "QC Report PDF Extractor":
-        st.subheader("QC Report PDF Extractor")
+        _subheader("QC Report PDF Extractor")
         st.write(
             "Upload one or more Grifols QC Report PDFs to extract **Unit ID** and "
             "**Don. date** for each donation on the report.  Results from all files "
@@ -2809,7 +2858,7 @@ def main() -> None:
             # Release comparison against unit status
             # ------------------------------------------------------------------
             st.markdown("---")
-            st.subheader("Release Comparison by Date")
+            _subheader("Release Comparison by Date")
             if us_df is None:
                 _show_info(
                     "Upload a **unit status file** (above) to compare QC releases "
@@ -2917,10 +2966,10 @@ def main() -> None:
         _show_info("Please upload a unit status file to use this section.")
 
     # =========================================================================
-    # Master Sheet Ejaculator
+    # Master Sheet 
     # =========================================================================
-    if nav_section == "Master Sheet Ejaculator":
-        st.subheader("Master Sheet Ejaculator")
+    if nav_section == "Master Sheet ":
+        _subheader("Master Sheet ")
         st.write(
             "Automatically fills the Master Sheet daily inventory table. "
             "Upload the files below, select a freezer and date, then review "
@@ -3282,7 +3331,7 @@ def main() -> None:
                     # Summary display
                     # ----------------------------------------------------------
                     st.markdown("---")
-                    st.subheader(f"Preview — {_sel_date_str} · {_sel_freezer}")
+                    _subheader(f"Preview — {_sel_date_str} · {_sel_freezer}")
 
                     _ms_kpi_cols = st.columns(4)
                     _ms_kpi_cols[0].metric("Day 1 Freezing (a)", _col_a)
@@ -3408,7 +3457,7 @@ def main() -> None:
     # Storage Manager
     # =========================================================================
     if nav_section == "Storage Manager":
-        st.subheader("Storage Manager")
+        _subheader("Storage Manager")
 
         if _sb_client is None:
             _show_warning("Supabase is not connected. Configure SUPABASE_URL and SUPABASE_KEY in secrets.toml to use this section.")

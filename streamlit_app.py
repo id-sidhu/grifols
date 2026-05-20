@@ -1333,6 +1333,197 @@ def parse_qc_report_pdf(pdf_file) -> pd.DataFrame:
     return pd.DataFrame(all_rows, columns=["Unit ID", "Don. date"])
 
 
+# ---------------------------------------------------------------------------
+# Supabase storage helpers
+# All files live inside one bucket whose name is set here or overridden via
+# the SUPABASE_BUCKET secret.
+# ---------------------------------------------------------------------------
+_SUPABASE_BUCKET = "grifols"
+
+
+def _get_supabase_client():
+    """Return a Supabase client if SUPABASE_URL / SUPABASE_KEY are in secrets."""
+    try:
+        from supabase import create_client
+        _bucket_override = st.secrets.get("SUPABASE_BUCKET", "")
+        global _SUPABASE_BUCKET
+        if _bucket_override:
+            _SUPABASE_BUCKET = _bucket_override
+        return create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
+    except Exception:
+        return None
+
+
+def _sb_list_files(client, folder: str) -> List[str]:
+    """Return sorted file names inside a Supabase storage folder."""
+    try:
+        items = client.storage.from_(_SUPABASE_BUCKET).list(folder) or []
+        return sorted(
+            item["name"] for item in items
+            if item.get("name") and not item["name"].startswith(".")
+        )
+    except Exception:
+        return []
+
+
+def _sb_download(client, path: str) -> Optional[bytes]:
+    """Download raw bytes from Supabase storage. Returns None on failure."""
+    try:
+        return client.storage.from_(_SUPABASE_BUCKET).download(path)
+    except Exception:
+        return None
+
+
+def _sb_upload(client, path: str, data: bytes, mime: str = "text/csv") -> bool:
+    """Upsert a file to Supabase storage. Returns True on success."""
+    try:
+        client.storage.from_(_SUPABASE_BUCKET).upload(
+            path, data, file_options={"content-type": mime, "upsert": "true"},
+        )
+        return True
+    except Exception:
+        return False
+
+
+def _sb_file_widget(
+    label: str,
+    folder: str,
+    uploader_key: str,
+    file_types: List[str],
+    client,
+    accept_multiple: bool = False,
+    save_mime: str = "text/csv",
+):
+    """File uploader augmented with optional Supabase storage.
+
+    Without Supabase (``client=None``) behaves identically to
+    ``st.file_uploader``.  When connected:
+
+    * An uploaded file shows a **"Save to storage"** button.
+    * A selectbox / multiselect lets the user load a previously-saved file
+      instead of uploading again.  Downloaded bytes are cached in session
+      state so repeated reruns don't re-fetch from Supabase.
+    * An uploaded file always takes priority over a storage selection.
+    """
+    # --- standard uploader (always shown) ---
+    uploaded = st.file_uploader(
+        label, type=file_types, key=uploader_key,
+        accept_multiple_files=accept_multiple,
+    )
+
+    if client is None:
+        return uploaded
+
+    # ---- keys used for session-state caching ----
+    _ls_key = f"_sb_ls_{uploader_key}"   # cached file listing
+    _ln_key = f"_sb_ln_{uploader_key}"   # last loaded name(s)
+    _ld_key = f"_sb_ld_{uploader_key}"   # loaded bytes (or dict)
+
+    # Populate the file listing once per session (invalidated after a save)
+    if _ls_key not in st.session_state:
+        st.session_state[_ls_key] = _sb_list_files(client, folder)
+    _sb_files: List[str] = st.session_state[_ls_key]
+
+    # ---- save button(s) for freshly uploaded files ----
+    if uploaded and not accept_multiple:
+        if st.button(
+            f"💾  Save '{uploaded.name}' to storage",
+            key=f"{uploader_key}_sb_save",
+        ):
+            uploaded.seek(0)
+            _raw = uploaded.read()
+            uploaded.seek(0)
+            if _sb_upload(client, f"{folder}/{uploaded.name}", _raw, mime=save_mime):
+                st.success(f"Saved to storage: **{uploaded.name}**")
+                st.session_state[_ls_key] = _sb_list_files(client, folder)
+            else:
+                st.error("Save failed — check Supabase credentials and bucket permissions.")
+
+    elif uploaded and accept_multiple:
+        if st.button(
+            f"💾  Save {len(uploaded)} file(s) to storage",
+            key=f"{uploader_key}_sb_save",
+        ):
+            _saved, _failed = [], []
+            for _uf in uploaded:
+                _uf.seek(0)
+                _raw = _uf.read()
+                _uf.seek(0)
+                if _sb_upload(client, f"{folder}/{_uf.name}", _raw, save_mime):
+                    _saved.append(_uf.name)
+                else:
+                    _failed.append(_uf.name)
+            if _saved:
+                st.success(f"Saved: {', '.join(_saved)}")
+                st.session_state[_ls_key] = _sb_list_files(client, folder)
+            if _failed:
+                st.warning(f"Failed to save: {', '.join(_failed)}")
+
+    # ---- load from storage ----
+    if _sb_files:
+        if not accept_multiple:
+            _opts = ["— select from storage —"] + _sb_files
+            _sel = st.selectbox(
+                "Or load from storage:",
+                _opts,
+                key=f"{uploader_key}_sb_pick",
+            )
+            if _sel and _sel != "— select from storage —":
+                if st.session_state.get(_ln_key) != _sel:
+                    _data = _sb_download(client, f"{folder}/{_sel}")
+                    st.session_state[_ln_key] = _sel
+                    st.session_state[_ld_key] = _data
+        else:
+            _sel_multi = st.multiselect(
+                "Or load from storage:",
+                _sb_files,
+                key=f"{uploader_key}_sb_pick",
+            )
+            if _sel_multi:
+                if st.session_state.get(_ln_key) != _sel_multi:
+                    _multi_data: Dict[str, bytes] = {}
+                    for _fn in _sel_multi:
+                        _d = _sb_download(client, f"{folder}/{_fn}")
+                        if _d:
+                            _multi_data[_fn] = _d
+                    st.session_state[_ln_key] = _sel_multi
+                    st.session_state[_ld_key] = _multi_data
+            else:
+                st.session_state.pop(_ln_key, None)
+                st.session_state.pop(_ld_key, None)
+    elif not uploaded:
+        st.caption(f"No files in storage folder `{folder}/` yet — upload one above.")
+
+    # ---- determine return value ----
+    if uploaded:
+        # Uploaded file wins; clear any stale storage cache so the next
+        # time the uploader is empty the storage pick still works.
+        st.session_state.pop(_ln_key, None)
+        st.session_state.pop(_ld_key, None)
+        return uploaded
+
+    _cached_data = st.session_state.get(_ld_key)
+    _cached_name = st.session_state.get(_ln_key)
+    if _cached_data and _cached_name:
+        import io as _io_sb
+        if not accept_multiple:
+            _f = _io_sb.BytesIO(_cached_data)
+            _f.name = _cached_name
+            st.info(f"Using from storage: **{_cached_name}**")
+            return _f
+        else:
+            _files_sb: List = []
+            for _fn, _fd in _cached_data.items():
+                _f = _io_sb.BytesIO(_fd)
+                _f.name = _fn
+                _files_sb.append(_f)
+            if _files_sb:
+                st.info(f"Using from storage: **{', '.join(_cached_data.keys())}**")
+            return _files_sb
+
+    return [] if accept_multiple else None
+
+
 def parse_master_sheet(ms_file) -> Dict:
     """Parse a master sheet CSV into structured data keyed by freezer ID.
 
@@ -1451,14 +1642,27 @@ def main() -> None:
         "you can also analyse donations on a specific prefix and control number(s)."
     )
 
-    # File uploader for the shipment file.  This is required for the pallet report.
-    shipment_file = st.file_uploader(
-        label="Upload Grifols shipment file", type=["csv", "xlsx", "xls"], key="shipment"
+    # Initialise Supabase once per session (None when secrets are not configured)
+    if "_sb_client_cache" not in st.session_state:
+        st.session_state["_sb_client_cache"] = _get_supabase_client()
+    _sb_client = st.session_state["_sb_client_cache"]
+
+    if _sb_client:
+        st.caption("☁️ Connected to Supabase storage — files can be saved and loaded from the cloud.")
+
+    shipment_file = _sb_file_widget(
+        "Upload Grifols shipment file",
+        "shipment",
+        "shipment",
+        ["csv", "xlsx", "xls"],
+        _sb_client,
     )
-    # File uploader for the unit status file.  This is optional and can be
-    # used to demonstrate the cleaning helper and the unit status analysis.
-    unit_status_file = st.file_uploader(
-        label="Upload unit status file (optional)", type=["csv", "xlsx", "xls"], key="unit_status"
+    unit_status_file = _sb_file_widget(
+        "Upload unit status file (optional)",
+        "unit-status",
+        "unit_status",
+        ["csv", "xlsx", "xls"],
+        _sb_client,
     )
 
     def _read_upload(uploaded_file, dtype=None) -> Optional[pd.DataFrame]:
@@ -2648,24 +2852,32 @@ def main() -> None:
 
         _ms_c1, _ms_c2 = st.columns(2)
         with _ms_c1:
-            _ms_file = st.file_uploader(
-                "Upload Master Sheet CSV",
-                type=["csv"],
-                key="ms_master_file",
+            _ms_file = _sb_file_widget(
+                "Master Sheet CSV",
+                "master-sheet",
+                "ms_master_file",
+                ["csv"],
+                _sb_client,
+                save_mime="text/csv",
             )
         with _ms_c2:
-            _us_2025_file = st.file_uploader(
-                "Upload 2025 Unit Status (for Donor ID columns e & f)",
-                type=["csv", "xlsx", "xls"],
-                key="ms_us_2025_file",
+            _us_2025_file = _sb_file_widget(
+                "2025 Unit Status (for Donor ID columns e & f)",
+                "unit-status-2025",
+                "ms_us_2025_file",
+                ["csv", "xlsx", "xls"],
+                _sb_client,
             )
 
-        _ms_qc_pdfs = st.file_uploader(
-            "Upload QC Report PDF(s) — required for column (c). "
+        _ms_qc_pdfs = _sb_file_widget(
+            "QC Report PDF(s) — required for column (c). "
             "Alternatively, extract them in the QC Report PDF Extractor section first.",
-            type=["pdf"],
-            key="ms_qc_pdf",
-            accept_multiple_files=True,
+            "qc-reports",
+            "ms_qc_pdf",
+            ["pdf"],
+            _sb_client,
+            accept_multiple=True,
+            save_mime="application/pdf",
         )
 
         # Read 2025 unit status
@@ -3092,6 +3304,27 @@ def main() -> None:
                                     mime="text/csv",
                                     key="ms_dl_btn",
                                 )
+                                if _sb_client:
+                                    if st.button(
+                                        "💾  Save updated Master Sheet to storage",
+                                        key="ms_sb_save_updated",
+                                        help="Overwrites master-sheet/master_sheet.csv in Supabase",
+                                    ):
+                                        if _sb_upload(
+                                            _sb_client,
+                                            "master-sheet/master_sheet.csv",
+                                            _updated_csv,
+                                            "text/csv",
+                                        ):
+                                            st.success(
+                                                "Master sheet saved to Supabase storage as "
+                                                "**master_sheet.csv**."
+                                            )
+                                            # Invalidate the file listing cache so the
+                                            # updated file appears immediately in the picker
+                                            st.session_state.pop("_sb_ls_ms_master_file", None)
+                                        else:
+                                            st.error("Failed to save to Supabase.")
                         except Exception as _ms_apply_err:
                             st.exception(_ms_apply_err)
 

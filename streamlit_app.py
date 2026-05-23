@@ -853,13 +853,14 @@ def build_rack_html(
   }}
 
   /* ── Column-group separators (after col 6 and col 12) ── */
+  /* Dark inset shadow = "wider gap" illusion — visible on every cell colour  */
   .rack-grid > .rack-cell:nth-child(18n + 6),
   .rack-grid > .rack-cell:nth-child(18n + 12) {{
-    box-shadow: inset -3px 0 0 rgba(255,255,255,0.25);
+    box-shadow: inset -2px 0 0 rgba(0,0,0,0.70);
   }}
   .rack-grid > .rack-cell:nth-child(18n + 7),
   .rack-grid > .rack-cell:nth-child(18n + 13) {{
-    box-shadow: inset 3px 0 0 rgba(255,255,255,0.25);
+    box-shadow: inset 2px 0 0 rgba(0,0,0,0.70);
   }}
 
   /* ── Hover ──────────────────────────────────────────── */
@@ -872,6 +873,17 @@ def build_rack_html(
 """
     return html
 
+
+# ---------------------------------------------------------------------------
+# Rack fullscreen dialog (mobile-friendly expand view)
+@st.dialog("🔍 Rack — Full View", width="large")
+def _show_rack_fullscreen_dialog():
+    """Render the saved rack HTML inside a large modal dialog."""
+    _html = st.session_state.get("_rack_fs_html", "")
+    if _html:
+        st.markdown(_html, unsafe_allow_html=True)
+    else:
+        st.info("No rack to display.")
 
 
 def build_vi_label_groups(
@@ -2326,6 +2338,15 @@ header { visibility: visible; }
                 fill_value="–",
             )
             st.markdown(_rack_html, unsafe_allow_html=True)
+            # ── Fullscreen / expand button (especially useful on mobile) ──
+            if st.button(
+                "⛶  Expand rack (fullscreen view)",
+                key="rack_expand_btn",
+                help="Opens the rack in a large modal — tap to fit your screen.",
+                use_container_width=False,
+            ):
+                st.session_state["_rack_fs_html"] = _rack_html
+                _show_rack_fullscreen_dialog()
 
     if nav_section == "Visual Inspection Labels" and us_df is not None:
         _subheader("Visual Inspection Labels")

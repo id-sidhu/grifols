@@ -753,6 +753,29 @@ def build_rack_html(
     grid-template-columns: repeat(18, var(--cell-w));
   }}
 
+  /* ── Mobile: shrink cells so all 18 columns fit on screen ── */
+  @media (max-width: 900px) {{
+    .rack-grid {{
+      --cell-w: clamp(18px, 4.8vw, 38px);
+      --gap: 3px;
+      grid-auto-rows: clamp(22px, 5.5vw, 34px);
+    }}
+    .rack-cell {{
+      font-size: clamp(8px, 2.2vw, 13px);
+      border-radius: 4px;
+    }}
+    .rack-wrap {{
+      padding: 8px 6px 10px 6px;
+    }}
+    .rack-title {{
+      font-size: 13px;
+    }}
+    .rack-legend {{
+      font-size: 10px;
+      gap: 8px;
+    }}
+  }}
+
   /* ── Base cell ──────────────────────────────────────── */
   .rack-cell {{
     display: flex;
@@ -3393,7 +3416,9 @@ header { visibility: visible; }
                                     hide_index=False,
                                 )
 
-                            _tab_add, _tab_find = st.tabs(["Add Rows", "Edit by Date"])
+                            _tab_add, _tab_find, _tab_ctrl_us = st.tabs(
+                                ["Add Rows", "Edit by Date", "Edit by Control #"]
+                            )
 
                             # ── Add Rows (paste) ─────────────────────────────
                             with _tab_add:
@@ -3540,6 +3565,238 @@ header { visibility: visible; }
                                                     f"Saved {len(_valid_found)} row(s) for "
                                                     f"{_found_date_label}."
                                                 )
+                                                st.rerun()
+                                            else:
+                                                _show_error(f"Save failed: {_save_res}")
+
+                            # ── Edit by Control # (Unit Status) ─────────────
+                            with _tab_ctrl_us:
+                                _us_ctrl_col = "Donation #"
+                                if _us_ctrl_col not in _us_cols:
+                                    st.warning(f"Column '{_us_ctrl_col}' not found in this file.")
+                                else:
+                                    _us_ctrl_q = st.text_input(
+                                        "Control number (Donation # suffix, e.g. 002035)",
+                                        key="_sm_us_ctrl_q",
+                                        placeholder="002035",
+                                    )
+                                    if st.button("Search", key="_sm_us_ctrl_search_btn"):
+                                        if not _us_ctrl_q.strip():
+                                            _show_warning("Enter a control number.")
+                                        else:
+                                            _us_ctrl_mask = (
+                                                _us_df_edit[_us_ctrl_col]
+                                                .astype(str).str.strip()
+                                                .str.endswith(_us_ctrl_q.strip())
+                                            )
+                                            _us_ctrl_found = _us_df_edit.index[_us_ctrl_mask].tolist()
+                                            st.session_state["_sm_us_ctrl_found"] = _us_ctrl_found
+                                            st.session_state["_sm_us_ctrl_key"] = _us_df_key
+                                            if not _us_ctrl_found:
+                                                _show_info(
+                                                    f"No rows where {_us_ctrl_col} ends with "
+                                                    f"'{_us_ctrl_q.strip()}'."
+                                                )
+                                    _us_ctrl_found = st.session_state.get("_sm_us_ctrl_found", [])
+                                    if st.session_state.get("_sm_us_ctrl_key", "") != _us_df_key:
+                                        _us_ctrl_found = []
+                                    if _us_ctrl_found:
+                                        _us_ctrl_valid = [i for i in _us_ctrl_found if i in _us_df_edit.index]
+                                        st.markdown(f"**{len(_us_ctrl_valid)} row(s) found**")
+                                        _us_ctrl_edited = st.data_editor(
+                                            _us_df_edit.loc[_us_ctrl_valid].copy(),
+                                            use_container_width=True,
+                                            hide_index=False,
+                                            key=f"_sm_us_ctrl_editor_{_us_df_key}",
+                                            num_rows="fixed",
+                                        )
+                                        if st.button("Save Changes", key="_sm_us_ctrl_save_btn"):
+                                            for _col in _us_cols:
+                                                if _col in _us_ctrl_edited.columns:
+                                                    _us_df_edit.loc[_us_ctrl_valid, _col] = (
+                                                        _us_ctrl_edited[_col].values
+                                                    )
+                                            _save_res = _sb_upload(
+                                                _sb_client,
+                                                f"unit-status/{_us_edit_sel}",
+                                                _sm_df_to_csv_bytes(_us_df_edit),
+                                                "text/csv",
+                                            )
+                                            if _save_res is True:
+                                                st.session_state[_us_df_key] = _us_df_edit
+                                                _show_success(f"Saved {len(_us_ctrl_valid)} row(s).")
+                                                st.rerun()
+                                            else:
+                                                _show_error(f"Save failed: {_save_res}")
+
+                # ── Shipment file row editing ────────────────────────────────
+                if _sm_folder == "shipment" and _sm_files:
+                    with st.expander("Edit Rows in Shipment File"):
+                        _gs_edit_sel = st.selectbox(
+                            "Select file to edit",
+                            _sm_files,
+                            key="_sm_gs_edit_sel",
+                        )
+                        _gs_df_key = f"_sm_gs_df_{_gs_edit_sel}"
+
+                        if _gs_df_key not in st.session_state:
+                            _gs_raw = _sb_download(_sb_client, f"shipment/{_gs_edit_sel}")
+                            if _gs_raw:
+                                _loaded_gs = _sm_load_df(_gs_raw, _gs_edit_sel)
+                                if _loaded_gs is not None:
+                                    st.session_state[_gs_df_key] = _loaded_gs
+                                else:
+                                    _show_error("Could not parse the selected file.")
+                            else:
+                                _show_error("Could not download the selected file from storage.")
+
+                        if _gs_df_key in st.session_state:
+                            _gs_df_edit: pd.DataFrame = st.session_state[_gs_df_key]
+                            _gs_cols = list(_gs_df_edit.columns)
+                            _show_caption(f"{len(_gs_df_edit)} rows · {len(_gs_cols)} columns")
+
+                            with st.expander("Preview last 10 rows", expanded=False):
+                                st.dataframe(
+                                    _gs_df_edit.tail(10),
+                                    use_container_width=True,
+                                    hide_index=False,
+                                )
+
+                            _gs_tab_pallet, _gs_tab_ctrl = st.tabs(
+                                ["Edit by Pallet", "Edit by Control #"]
+                            )
+
+                            # ── Edit by Pallet ────────────────────────────────
+                            with _gs_tab_pallet:
+                                if "Comments" not in _gs_cols:
+                                    st.warning("Column 'Comments' not found — cannot search by pallet.")
+                                else:
+                                    _gs_pallet_no = st.number_input(
+                                        "Pallet number", min_value=1, step=1,
+                                        value=1, key="_sm_gs_pallet_no", format="%d",
+                                    )
+                                    if st.button("Search pallet", key="_sm_gs_pallet_search_btn"):
+                                        _p = int(_gs_pallet_no)
+                                        _sop_pat = re.compile(
+                                            rf"^\s*START\s+OF\s+PALLET\s+{_p}\s*$", re.IGNORECASE
+                                        )
+                                        _eop_pat = re.compile(
+                                            rf"^\s*END\s+OF\s+PALLET\s+{_p}\s*$", re.IGNORECASE
+                                        )
+                                        _gs_comments = _gs_df_edit["Comments"].fillna("").astype(str)
+                                        _sop_rows = _gs_df_edit.index[_gs_comments.str.match(_sop_pat)].tolist()
+                                        _eop_rows = _gs_df_edit.index[_gs_comments.str.match(_eop_pat)].tolist()
+                                        if not _sop_rows or not _eop_rows:
+                                            _show_info(f"Pallet {_p} markers not found in Comments.")
+                                            st.session_state["_sm_gs_pallet_idx"] = []
+                                        else:
+                                            _p_start = min(_sop_rows[0], _eop_rows[0])
+                                            _p_end = max(_sop_rows[0], _eop_rows[0])
+                                            _p_idx = [
+                                                i for i in range(_p_start, _p_end + 1)
+                                                if i in _gs_df_edit.index
+                                            ]
+                                            st.session_state["_sm_gs_pallet_idx"] = _p_idx
+                                            st.session_state["_sm_gs_pallet_key"] = _gs_df_key
+                                            st.session_state["_sm_gs_pallet_num"] = _p
+                                            if not _p_idx:
+                                                _show_info(f"No rows found for Pallet {_p}.")
+
+                                    _gs_pallet_idx = st.session_state.get("_sm_gs_pallet_idx", [])
+                                    if st.session_state.get("_sm_gs_pallet_key", "") != _gs_df_key:
+                                        _gs_pallet_idx = []
+
+                                    if _gs_pallet_idx:
+                                        _gs_p_num = st.session_state.get("_sm_gs_pallet_num", "")
+                                        st.markdown(
+                                            f"**{len(_gs_pallet_idx)} row(s)** for "
+                                            f"**Pallet {_gs_p_num}** — edit then click Save."
+                                        )
+                                        _gs_pallet_edited = st.data_editor(
+                                            _gs_df_edit.loc[_gs_pallet_idx].copy(),
+                                            use_container_width=True,
+                                            hide_index=False,
+                                            key=f"_sm_gs_pallet_editor_{_gs_df_key}_{_gs_p_num}",
+                                            num_rows="fixed",
+                                        )
+                                        if st.button("Save Changes", key="_sm_gs_pallet_save_btn"):
+                                            for _col in _gs_cols:
+                                                if _col in _gs_pallet_edited.columns:
+                                                    _gs_df_edit.loc[_gs_pallet_idx, _col] = (
+                                                        _gs_pallet_edited[_col].values
+                                                    )
+                                            _save_res = _sb_upload(
+                                                _sb_client,
+                                                f"shipment/{_gs_edit_sel}",
+                                                _sm_df_to_csv_bytes(_gs_df_edit),
+                                                "text/csv",
+                                            )
+                                            if _save_res is True:
+                                                st.session_state[_gs_df_key] = _gs_df_edit
+                                                _show_success(
+                                                    f"Saved {len(_gs_pallet_idx)} row(s) "
+                                                    f"for Pallet {_gs_p_num}."
+                                                )
+                                                st.rerun()
+                                            else:
+                                                _show_error(f"Save failed: {_save_res}")
+
+                            # ── Edit by Control # (Shipment) ──────────────────
+                            with _gs_tab_ctrl:
+                                _gs_ctrl_col = "Sample ID"
+                                if _gs_ctrl_col not in _gs_cols:
+                                    st.warning(f"Column '{_gs_ctrl_col}' not found in this file.")
+                                else:
+                                    _gs_ctrl_q = st.text_input(
+                                        "Control number (Sample ID suffix, e.g. 002035)",
+                                        key="_sm_gs_ctrl_q",
+                                        placeholder="002035",
+                                    )
+                                    if st.button("Search", key="_sm_gs_ctrl_search_btn"):
+                                        if not _gs_ctrl_q.strip():
+                                            _show_warning("Enter a control number.")
+                                        else:
+                                            _gs_ctrl_mask = (
+                                                _gs_df_edit[_gs_ctrl_col]
+                                                .astype(str).str.strip()
+                                                .str.endswith(_gs_ctrl_q.strip())
+                                            )
+                                            _gs_ctrl_found = _gs_df_edit.index[_gs_ctrl_mask].tolist()
+                                            st.session_state["_sm_gs_ctrl_found"] = _gs_ctrl_found
+                                            st.session_state["_sm_gs_ctrl_key"] = _gs_df_key
+                                            if not _gs_ctrl_found:
+                                                _show_info(
+                                                    f"No rows where {_gs_ctrl_col} ends with "
+                                                    f"'{_gs_ctrl_q.strip()}'."
+                                                )
+                                    _gs_ctrl_found = st.session_state.get("_sm_gs_ctrl_found", [])
+                                    if st.session_state.get("_sm_gs_ctrl_key", "") != _gs_df_key:
+                                        _gs_ctrl_found = []
+                                    if _gs_ctrl_found:
+                                        _gs_ctrl_valid = [i for i in _gs_ctrl_found if i in _gs_df_edit.index]
+                                        st.markdown(f"**{len(_gs_ctrl_valid)} row(s) found**")
+                                        _gs_ctrl_edited = st.data_editor(
+                                            _gs_df_edit.loc[_gs_ctrl_valid].copy(),
+                                            use_container_width=True,
+                                            hide_index=False,
+                                            key=f"_sm_gs_ctrl_editor_{_gs_df_key}",
+                                            num_rows="fixed",
+                                        )
+                                        if st.button("Save Changes", key="_sm_gs_ctrl_save_btn"):
+                                            for _col in _gs_cols:
+                                                if _col in _gs_ctrl_edited.columns:
+                                                    _gs_df_edit.loc[_gs_ctrl_valid, _col] = (
+                                                        _gs_ctrl_edited[_col].values
+                                                    )
+                                            _save_res = _sb_upload(
+                                                _sb_client,
+                                                f"shipment/{_gs_edit_sel}",
+                                                _sm_df_to_csv_bytes(_gs_df_edit),
+                                                "text/csv",
+                                            )
+                                            if _save_res is True:
+                                                st.session_state[_gs_df_key] = _gs_df_edit
+                                                _show_success(f"Saved {len(_gs_ctrl_valid)} row(s).")
                                                 st.rerun()
                                             else:
                                                 _show_error(f"Save failed: {_save_res}")

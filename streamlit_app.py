@@ -65,10 +65,9 @@ import streamlit as st
 FEATURES: Dict[str, bool] = {
     "Pallet Report": True,
     "Manual racks/Unit Status Check": True,
-    "Pre-built Rack Browser": True,
     "Visual Inspection Labels": True,
-    "QC Report PDF Extractor": False,
-    "Master Sheet ": True,
+    "QC Report PDF Extractor": True,
+    "Master Sheet ": False,
     "Storage Manager": True,
 }
 
@@ -675,37 +674,42 @@ def build_rack_html(
 </div>
 
 <style>
+  /* ── Rack container ────────────────────────────────── */
   .rack-wrap {{
-    padding: 12px 12px 14px 12px;
+    padding: 14px 14px 16px 14px;
     border: 1px solid #30363d;
     border-radius: 12px;
-    background: #0d1117;
+    background: #161b22;
     width: fit-content;
     max-width: 100%;
     overflow-x: auto;
   }}
 
   .rack-title {{
-    font-weight: 700;
-    font-size: 16px;
-    margin: 0 0 8px 0;
+    font-weight: 800;
+    font-size: 15px;
+    margin: 0 0 10px 0;
     color: #e6edf3;
+    letter-spacing: -0.02em;
   }}
 
+  /* ── Legend ─────────────────────────────────────────── */
   .rack-legend {{
     display: flex;
-    gap: 14px;
+    gap: 16px;
     align-items: center;
     font-size: 12px;
+    font-weight: 600;
     color: #c9d1d9;
-    margin-bottom: 10px;
+    margin-bottom: 12px;
     flex-wrap: wrap;
   }}
 
   .rack-date-range {{
     margin-left: auto;
-    font-size: 12px;
-    opacity: 0.65;
+    font-size: 11px;
+    font-weight: 400;
+    opacity: 0.6;
     white-space: nowrap;
     font-style: italic;
   }}
@@ -717,123 +721,129 @@ def build_rack_html(
   }}
 
   .swatch {{
-    width: 12px;
-    height: 12px;
+    width: 14px;
+    height: 14px;
     border-radius: 4px;
-    border: 1px solid rgba(255,255,255,0.15);
+    border: 1px solid rgba(0,0,0,0.25);
     display: inline-block;
+    flex-shrink: 0;
   }}
-  .swatch.present          {{ background: #238636; }}
-  .swatch.not-manifest     {{ background: #c9960c; }}
-  .swatch.samples-collected{{ background: #e5534b; }}
-  .swatch.blank            {{ background: #21262d; }}
-  .swatch.pallet-1         {{ background: #1f6feb; }}
-  .swatch.pallet-2         {{ background: #8957e5; }}
-  .swatch.pallet-3         {{ background: #2ea043; }}
-  .swatch.pallet-4         {{ background: #e3b341; }}
-  .swatch.pallet-5         {{ background: #db61a2; }}
-  .swatch.pallet-6         {{ background: #d29922; }}
 
-  /* TRUE 18-column grid (no spacer columns) */
+  /* Status swatches */
+  .swatch.present           {{ background: #4ade80; }}
+  .swatch.not-manifest      {{ background: #fbbf24; }}
+  .swatch.samples-collected {{ background: #f87171; }}
+  .swatch.blank             {{ background: #21262d; border-color: rgba(255,255,255,0.1); }}
+
+  /* Pallet swatches — one per hue family */
+  .swatch.pallet-1  {{ background: #60a5fa; }}   /* sky blue   */
+  .swatch.pallet-2  {{ background: #c084fc; }}   /* violet     */
+  .swatch.pallet-3  {{ background: #34d399; }}   /* emerald    */
+  .swatch.pallet-4  {{ background: #fb923c; }}   /* orange     */
+  .swatch.pallet-5  {{ background: #f472b6; }}   /* pink       */
+  .swatch.pallet-6  {{ background: #a3e635; }}   /* lime       */
+
+  /* ── Grid ───────────────────────────────────────────── */
   .rack-grid {{
-    --cell-w: 40px;
-    --gap: 6px;
-
+    --cell-w: 42px;
+    --gap: 5px;
     display: grid;
-    grid-auto-rows: 34px;
+    grid-auto-rows: 36px;
     gap: var(--gap);
     grid-template-columns: repeat(18, var(--cell-w));
   }}
 
+  /* ── Base cell ──────────────────────────────────────── */
   .rack-cell {{
     display: flex;
     align-items: center;
     justify-content: center;
-    border-radius: 8px;
-    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 7px;
+    border: 1px solid rgba(0,0,0,0.20);
     font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
-    font-weight: 700;
-    font-size: 14px;
-    letter-spacing: 0.5px;
+    font-weight: 800;
+    font-size: 13px;
+    letter-spacing: 0.4px;
     user-select: none;
-    transition: transform 0.06s ease;
+    transition: transform 0.07s ease, filter 0.07s ease;
     position: relative;
   }}
 
+  /* ── Status cells ───────────────────────────────────── */
   .rack-cell.present {{
-    background: #1c3d2e;
-    color: #3fb950;
+    background: #4ade80;
+    color: #14532d;
   }}
 
   .rack-cell.not-manifest {{
-    background: #3d2b00;
-    color: #f0b429;
+    background: #fbbf24;
+    color: #78350f;
   }}
 
   .rack-cell.samples-collected {{
-    background: #3d1a1a;
-    color: #e5534b;
+    background: #f87171;
+    color: #7f1d1d;
   }}
 
-  .rack-cell.pallet-1 {{ background: #0d2d45; color: #58a6ff; }}
-  .rack-cell.pallet-2 {{ background: #2d1f4a; color: #bc8cff; }}
-  .rack-cell.pallet-3 {{ background: #0d3d2a; color: #56d364; }}
-  .rack-cell.pallet-4 {{ background: #3d2000; color: #e3b341; }}
-  .rack-cell.pallet-5 {{ background: #3d0d2a; color: #f778ba; }}
-  .rack-cell.pallet-6 {{ background: #3a3200; color: #d4c500; }}
+  /* ── Pallet cells — vibrant, maximally distinct ─────── */
+  .rack-cell.pallet-1 {{ background: #60a5fa; color: #1e3a8a; }}  /* sky blue   */
+  .rack-cell.pallet-2 {{ background: #c084fc; color: #3b0764; }}  /* violet     */
+  .rack-cell.pallet-3 {{ background: #34d399; color: #064e3b; }}  /* emerald    */
+  .rack-cell.pallet-4 {{ background: #fb923c; color: #7c2d12; }}  /* orange     */
+  .rack-cell.pallet-5 {{ background: #f472b6; color: #831843; }}  /* pink       */
+  .rack-cell.pallet-6 {{ background: #a3e635; color: #365314; }}  /* lime       */
 
+  /* ── Empty cell ─────────────────────────────────────── */
   .rack-cell.blank {{
-    background: #161b22;
-    color: #3d444d;
-    font-weight: 600;
+    background: #1e2530;
+    color: #2d333b;
+    border-color: rgba(255,255,255,0.04);
   }}
 
-  /* Solid strikethrough line for already-packed cells */
+  /* ── Packed strikethrough ───────────────────────────── */
   .rack-cell.packed::after {{
     content: '';
     position: absolute;
     left: 4px;
     right: 4px;
     top: 50%;
-    height: 2px;
-    background: rgba(255, 255, 255, 0.65);
+    height: 2.5px;
+    background: rgba(0, 0, 0, 0.55);
     transform: translateY(-50%);
     pointer-events: none;
-    border-radius: 1px;
+    border-radius: 2px;
   }}
 
-  /* Legend swatch for packed */
   .swatch.packed-swatch {{
-    background: #30363d;
+    background: #9ca3af;
     position: relative;
   }}
   .swatch.packed-swatch::after {{
     content: '';
     position: absolute;
-    left: 0;
-    right: 0;
+    left: 1px; right: 1px;
     top: 50%;
     height: 2px;
-    background: rgba(255, 255, 255, 0.65);
+    background: rgba(0, 0, 0, 0.6);
     transform: translateY(-50%);
     border-radius: 1px;
   }}
 
-  /* Visible separators after col 6 and col 12 */
+  /* ── Column-group separators (after col 6 and col 12) ── */
   .rack-grid > .rack-cell:nth-child(18n + 6),
   .rack-grid > .rack-cell:nth-child(18n + 12) {{
-    box-shadow: inset -2px 0 0 #3b82f6;
+    box-shadow: inset -3px 0 0 rgba(255,255,255,0.25);
   }}
-
   .rack-grid > .rack-cell:nth-child(18n + 7),
   .rack-grid > .rack-cell:nth-child(18n + 13) {{
-    box-shadow: inset 2px 0 0 #3b82f6;
+    box-shadow: inset 3px 0 0 rgba(255,255,255,0.25);
   }}
 
-  /* Hover */
+  /* ── Hover ──────────────────────────────────────────── */
   .rack-cell:hover {{
-    transform: translateY(-1px);
-    filter: drop-shadow(0 4px 8px rgba(0,0,0,0.40));
+    transform: translateY(-2px);
+    filter: brightness(1.12) drop-shadow(0 4px 10px rgba(0,0,0,0.50));
+    z-index: 1;
   }}
 </style>
 """
@@ -1386,11 +1396,15 @@ def _get_supabase_client():
     """Return a Supabase client if SUPABASE_URL / SUPABASE_KEY are in secrets."""
     try:
         from supabase import create_client
+        url = st.secrets.get("SUPABASE_URL", "")
+        key = st.secrets.get("SUPABASE_KEY", "")
+        if not url or not key:
+            return None
         _bucket_override = st.secrets.get("SUPABASE_BUCKET", "")
         global _SUPABASE_BUCKET
         if _bucket_override:
             _SUPABASE_BUCKET = _bucket_override
-        return create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
+        return create_client(url, key)
     except Exception:
         return None
 
@@ -1871,7 +1885,6 @@ header { visibility: visible; }
     _all_sections = [
         "Pallet Report",
         "Manual racks/Unit Status Check",
-        "Pre-built Rack Browser",
         "Visual Inspection Labels",
         "QC Report PDF Extractor",
         "Master Sheet ",
@@ -1921,6 +1934,93 @@ header { visibility: visible; }
             "Ensure the columns include at least 'Sample ID', 'Comments' and 'Samples Packed?'."
         )
         st.dataframe(gs_df.head())
+
+        # ── Box # validation ──────────────────────────────────────────────
+        if "Box #" in gs_df.columns:
+            _subheader("Box Count Validation")
+            _box_col = (
+                gs_df["Box #"]
+                .dropna()
+                .astype(str)
+                .str.strip()
+            )
+            _box_col = _box_col[_box_col != ""]          # drop blank cells
+            _box_counts = _box_col.value_counts().sort_index()
+            _bad_boxes = _box_counts[_box_counts != 12]
+            _total_boxes = len(_box_counts)
+
+            if _bad_boxes.empty:
+                _show_success(
+                    f"All {_total_boxes} box(es) have exactly 12 samples."
+                )
+            else:
+                st.error(
+                    f"{len(_bad_boxes)} of {_total_boxes} box(es) "
+                    "do not have exactly 12 samples."
+                )
+                _bad_df = _bad_boxes.reset_index()
+                _bad_df.columns = ["Box #", "Count"]
+                _bad_df["Issue"] = _bad_df["Count"].apply(
+                    lambda c: f"Too many — {c}" if c > 12 else f"Too few — {c}"
+                )
+                st.dataframe(
+                    _bad_df[["Box #", "Count", "Issue"]],
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+        # ── Box Number Generator ──────────────────────────────────────────
+        _subheader("Box Number Generator")
+        _bg_col1, _bg_col2 = st.columns(2)
+        with _bg_col1:
+            _bg_start = st.number_input(
+                "Starting box number", min_value=1, step=1, value=1,
+                key="bg_start", format="%d",
+            )
+        with _bg_col2:
+            _bg_count = st.number_input(
+                "Number of boxes to generate", min_value=1, step=1, value=10,
+                key="bg_count", format="%d",
+            )
+
+        _bg_preview_rows = int(_bg_count) * 12
+        _show_caption(
+            f"Will generate {int(_bg_count)} box(es) × 12 = "
+            f"{_bg_preview_rows} rows  "
+            f"(Box {int(_bg_start)} → Box {int(_bg_start) + int(_bg_count) - 1})"
+        )
+
+        if st.button("Generate & Download", key="btn_box_gen"):
+            _box_numbers = []
+            for _bn in range(int(_bg_start), int(_bg_start) + int(_bg_count)):
+                _box_numbers.extend([_bn] * 12)
+            _bg_df = pd.DataFrame({"Box #": _box_numbers})
+            _bg_csv = _bg_df.to_csv(index=False).encode("utf-8")
+            st.session_state["_bg_csv"] = _bg_csv
+            st.session_state["_bg_label"] = (
+                f"box_{int(_bg_start)}_to_{int(_bg_start) + int(_bg_count) - 1}.csv"
+            )
+
+        if "_bg_csv" in st.session_state:
+            st.download_button(
+                label="Download box numbers CSV",
+                data=st.session_state["_bg_csv"],
+                file_name=st.session_state["_bg_label"],
+                mime="text/csv",
+                key="btn_box_gen_dl",
+            )
+            # quick preview — first box + last box
+            with st.expander("Preview first & last rows"):
+                _prev_nums = []
+                for _bn in range(int(_bg_start), int(_bg_start) + int(_bg_count)):
+                    _prev_nums.extend([_bn] * 12)
+                _prev_df = pd.DataFrame({"Box #": _prev_nums})
+                st.dataframe(
+                    pd.concat([_prev_df.head(12), _prev_df.tail(12)]),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
         # Optionally show a preview of the unit status file if uploaded
         if us_df is not None:
             _subheader("Unit Status Data Preview")
@@ -2204,382 +2304,6 @@ header { visibility: visible; }
             )
             st.markdown(_rack_html, unsafe_allow_html=True)
 
-    if nav_section == "Pre-built Rack Browser" and us_df is not None:
-        _subheader("Pre-built Rack Browser")
-        st.write(
-            "Automatically builds sequential racks of 216 samples from the unit "
-            "status file. Search for any unit ID to jump straight to its rack. "
-            "Enable **Edit positions** to rearrange samples or pull from the next rack."
-        )
-
-        pb_col1, pb_col2 = st.columns([3, 1])
-        with pb_col1:
-            pb_prefix = st.text_input(
-                "Donation prefix", value="F26-", key="pb_prefix_input", max_chars=20
-            ).strip()
-        with pb_col2:
-            st.write("")  # spacer to align button with input
-            build_racks_btn = st.button("Build Racks", key="btn_build_racks")
-
-        if build_racks_btn:
-            try:
-                cleaned_us_pb = clean_unit_status(us_df)
-                all_pb_ids = (
-                    cleaned_us_pb.get("Donation #", pd.Series(dtype=str))
-                    .dropna().astype(str).str.strip()
-                )
-
-                def _pb_num(x: str) -> int:
-                    m = re.match(rf"^{re.escape(pb_prefix)}(\d+)$", x, re.IGNORECASE)
-                    return int(m.group(1)) if m else int(1e18)
-
-                # Apply the same removal filter used by the range-based rack
-                # so that SO, rejected and no-bleed IDs are excluded.
-                try:
-                    to_remove_pb, _ = process_unit_status_all(cleaned_us_pb, pb_prefix)
-                except ValueError:
-                    to_remove_pb = set()
-                filtered_pb_ids: List[str] = sorted(
-                    [
-                        iid for iid in all_pb_ids
-                        if iid.upper().startswith(pb_prefix.upper())
-                        and iid not in to_remove_pb
-                    ],
-                    key=_pb_num,
-                )
-                # Group into racks of 216; pad the last rack with empty strings
-                pb_racks: Dict[int, List[str]] = {}
-                total_ids_pb = max(1, len(filtered_pb_ids))
-                for i, chunk_start in enumerate(range(0, total_ids_pb, 216)):
-                    chunk = filtered_pb_ids[chunk_start: chunk_start + 216]
-                    pb_racks[i] = chunk + [""] * (216 - len(chunk))
-                # Build reverse lookup: sample ID → rack index
-                pb_id_to_rack: Dict[str, int] = {
-                    sid: ridx
-                    for ridx, rids in pb_racks.items()
-                    for sid in rids if sid
-                }
-                st.session_state["pb_racks"] = pb_racks
-                st.session_state["pb_id_to_rack"] = pb_id_to_rack
-                st.session_state["pb_current_rack"] = 0
-                st.session_state["pb_prefix"] = pb_prefix
-                # Build date map: sample ID → datetime.date (from Donation Date column)
-                _pb_date_map: Dict[str, datetime.date] = {}
-                if (
-                    "Donation Date" in cleaned_us_pb.columns
-                    and "Donation #" in cleaned_us_pb.columns
-                ):
-                    for _, _dr in cleaned_us_pb.iterrows():
-                        _sid = str(_dr.get("Donation #", "")).strip()
-                        _d = _parse_donation_date(_dr.get("Donation Date"))
-                        if _sid and _d is not None:
-                            _pb_date_map[_sid] = _d
-                st.session_state["pb_date_map"] = _pb_date_map
-                total_filled_pb = sum(1 for rids in pb_racks.values() for s in rids if s)
-                _show_success(f"Built {len(pb_racks)} rack(s) with {total_filled_pb} samples.")
-            except Exception as e:
-                _show_error(f"Failed to build racks: {e}")
-
-        if "pb_racks" in st.session_state:
-            pb_racks = st.session_state["pb_racks"]
-            current_pb_idx = st.session_state.get("pb_current_rack", 0)
-
-            # Search box
-            pb_search = st.text_input(
-                "Search by unit ID to jump to its rack",
-                key="pb_search",
-                placeholder="e.g. 002035 or F26-002035",
-            ).strip()
-            if pb_search:
-                pb_prefix_val = st.session_state.get("pb_prefix", "F26-")
-                if pb_search.upper().startswith(pb_prefix_val.upper()):
-                    search_full_pb = pb_search
-                elif pb_search.isdigit():
-                    search_full_pb = f"{pb_prefix_val}{pb_search.zfill(6)}"
-                else:
-                    search_full_pb = pb_search
-                found_rack_idx = st.session_state["pb_id_to_rack"].get(search_full_pb)
-                if found_rack_idx is not None:
-                    st.session_state["pb_current_rack"] = found_rack_idx
-                    current_pb_idx = found_rack_idx
-                    _show_success(f"{search_full_pb} → Rack {found_rack_idx + 1}")
-                else:
-                    _show_warning(f"{search_full_pb} not found in any pre-built rack.")
-
-            # Filter by pallet — quickly find racks containing a specific pallet
-            if gs_df is not None:
-                _pallet_map_filter = build_pallet_map(gs_df)
-                if _pallet_map_filter:
-                    _available_pallets = sorted(set(_pallet_map_filter.values()))
-                    _pallet_options = ["—"] + [f"Pallet {p}" for p in _available_pallets]
-                    _selected_pallet = st.selectbox(
-                        "Filter racks by pallet",
-                        options=_pallet_options,
-                        key="pb_pallet_filter",
-                    )
-                    if _selected_pallet != "—":
-                        _pnum = int(_selected_pallet.split()[-1])
-                        _pallet_sids = {
-                            sid for sid, p in _pallet_map_filter.items() if p == _pnum
-                        }
-                        _matching_racks: Dict[int, int] = {}
-                        _total_pallet_samples = 0
-                        for ridx, rids in pb_racks.items():
-                            cnt = sum(1 for sid in rids if sid and sid in _pallet_sids)
-                            if cnt > 0:
-                                _matching_racks[ridx] = cnt
-                                _total_pallet_samples += cnt
-                        if _matching_racks:
-                            _show_info(
-                                f"**{_total_pallet_samples}** sample(s) from Pallet {_pnum} "
-                                f"found across **{len(_matching_racks)}** rack(s)"
-                            )
-                            # Jump buttons in rows of up to 6
-                            _rack_items = list(_matching_racks.items())
-                            for _row_start in range(0, len(_rack_items), 6):
-                                _row_chunk = _rack_items[_row_start : _row_start + 6]
-                                _jump_cols = st.columns(len(_row_chunk))
-                                for _ci, (ridx, cnt) in enumerate(_row_chunk):
-                                    with _jump_cols[_ci]:
-                                        if st.button(
-                                            f"Rack {ridx + 1} ({cnt})",
-                                            key=f"pb_pjump_{_pnum}_{ridx}",
-                                        ):
-                                            current_pb_idx = ridx
-                                            st.session_state["pb_current_rack"] = ridx
-                        else:
-                            _show_warning(
-                                f"No samples from Pallet {_pnum} found in any rack."
-                            )
-
-            # Navigation row — avoid st.rerun() so toggle states survive navigation
-            nav_c1, nav_c2, nav_c3 = st.columns([1, 5, 1])
-            with nav_c1:
-                prev_clicked = st.button(
-                    "◀ Prev", key="pb_prev", disabled=(current_pb_idx == 0)
-                )
-            with nav_c2:
-                _nav_info = st.empty()
-            with nav_c3:
-                next_clicked = st.button(
-                    "Next ▶", key="pb_next",
-                    disabled=(current_pb_idx >= len(pb_racks) - 1),
-                )
-
-            # Update index in-place; subsequent code uses the updated value
-            if prev_clicked and current_pb_idx > 0:
-                current_pb_idx -= 1
-                st.session_state["pb_current_rack"] = current_pb_idx
-            elif next_clicked and current_pb_idx < len(pb_racks) - 1:
-                current_pb_idx += 1
-                st.session_state["pb_current_rack"] = current_pb_idx
-
-            filled_count = sum(1 for s in pb_racks[current_pb_idx] if s)
-            _nav_info.markdown(
-                f"**Rack {current_pb_idx + 1} of {len(pb_racks)}** "
-                f"— {filled_count} / 216 positions filled"
-            )
-
-            rack_ids_current = list(pb_racks[current_pb_idx])
-
-            # Compute date range string for rack legend
-            _date_map_pb = st.session_state.get("pb_date_map", {})
-            _pb_date_range_str: Optional[str] = None
-            if _date_map_pb:
-                _rack_dates = [
-                    _date_map_pb[sid]
-                    for sid in rack_ids_current
-                    if sid and sid in _date_map_pb
-                ]
-                if _rack_dates:
-                    _dmin = min(_rack_dates)
-                    _dmax = max(_rack_dates)
-                    _pb_date_range_str = (
-                        _dmin.strftime("%d.%m.%Y")
-                        if _dmin == _dmax
-                        else f"{_dmin.strftime('%d.%m.%Y')} – {_dmax.strftime('%d.%m.%Y')}"
-                    )
-
-            # Edit mode toggle
-            pb_edit_mode = st.checkbox("Edit positions", key="pb_edit_mode", value=False)
-
-            if pb_edit_mode:
-                _show_caption(
-                    "Edit Sample IDs directly in the table. Clear a cell to leave "
-                    "that position empty. Use **Apply Changes** to save edits, or "
-                    "**Re-pack from next rack** to pull samples forward and fill gaps."
-                )
-                edit_df_pb = pd.DataFrame({
-                    "Position": list(range(1, 217)),
-                    "Sample ID": rack_ids_current,
-                })
-                edited_df_pb = st.data_editor(
-                    edit_df_pb,
-                    use_container_width=True,
-                    hide_index=True,
-                    key=f"pb_editor_{current_pb_idx}",
-                    column_config={
-                        "Position": st.column_config.NumberColumn(
-                            "Pos", disabled=True, width="small"
-                        ),
-                        "Sample ID": st.column_config.TextColumn(
-                            "Sample ID", width="medium"
-                        ),
-                    },
-                    num_rows="fixed",
-                )
-
-                btn_c1, btn_c2 = st.columns(2)
-                with btn_c1:
-                    if st.button("Apply Changes", key="pb_apply"):
-                        new_ids_pb = [
-                            str(v).strip() if pd.notna(v) and str(v).strip() else ""
-                            for v in edited_df_pb["Sample ID"]
-                        ]
-                        new_ids_pb = (new_ids_pb + [""] * 216)[:216]
-                        st.session_state["pb_racks"][current_pb_idx] = new_ids_pb
-                        st.session_state["pb_id_to_rack"] = {
-                            sid: ridx
-                            for ridx, rids in st.session_state["pb_racks"].items()
-                            for sid in rids if sid
-                        }
-                        _show_success("Changes saved.")
-                        st.rerun()
-                with btn_c2:
-                    has_next_rack = current_pb_idx + 1 < len(pb_racks)
-                    if st.button(
-                        "Re-pack from next rack", key="pb_repack",
-                        disabled=not has_next_rack
-                    ):
-                        cur_ids_edit = [
-                            str(v).strip() if pd.notna(v) and str(v).strip() else ""
-                            for v in edited_df_pb["Sample ID"]
-                        ]
-                        nxt_ids_edit = list(pb_racks[current_pb_idx + 1])
-                        combined_pb = (
-                            [s for s in cur_ids_edit if s]
-                            + [s for s in nxt_ids_edit if s]
-                        )
-                        st.session_state["pb_racks"][current_pb_idx] = (
-                            combined_pb[:216] + [""] * max(0, 216 - len(combined_pb))
-                        )[:216]
-                        st.session_state["pb_racks"][current_pb_idx + 1] = (
-                            combined_pb[216:] + [""] * max(0, 216 - len(combined_pb[216:]))
-                        )[:216]
-                        st.session_state["pb_id_to_rack"] = {
-                            sid: ridx
-                            for ridx, rids in st.session_state["pb_racks"].items()
-                            for sid in rids if sid
-                        }
-                        _show_success("Re-packed successfully.")
-                        st.rerun()
-
-                # Trim rack size — limit this rack to N samples, overflow → next rack
-                st.markdown("---")
-                st.markdown("**Set rack size**")
-                _show_caption(
-                    "Limit this rack to a specific number of samples. "
-                    "Any samples beyond that count are moved to the start of the next rack."
-                )
-                _cur_filled = sum(
-                    1 for v in edited_df_pb["Sample ID"]
-                    if pd.notna(v) and str(v).strip()
-                )
-                trim_c1, trim_c2 = st.columns([3, 1])
-                with trim_c1:
-                    trim_size = st.number_input(
-                        "Max samples in this rack",
-                        min_value=1,
-                        max_value=216,
-                        value=min(_cur_filled, 216),
-                        step=1,
-                        key="pb_trim_size",
-                    )
-                with trim_c2:
-                    st.write("")
-                    _has_next_for_trim = current_pb_idx + 1 < len(pb_racks)
-                    apply_trim = st.button(
-                        "Apply trim",
-                        key="pb_apply_trim",
-                        disabled=not _has_next_for_trim,
-                        help="Requires a next rack to receive the overflow samples.",
-                    )
-                if apply_trim:
-                    cur_ids_trim = [
-                        str(v).strip() if pd.notna(v) and str(v).strip() else ""
-                        for v in edited_df_pb["Sample ID"]
-                    ]
-                    filled_trim = [s for s in cur_ids_trim if s]
-                    kept_trim = filled_trim[:trim_size]
-                    overflow_trim = filled_trim[trim_size:]
-                    st.session_state["pb_racks"][current_pb_idx] = (
-                        kept_trim + [""] * (216 - len(kept_trim))
-                    )[:216]
-                    if overflow_trim:
-                        nxt_trim = list(st.session_state["pb_racks"][current_pb_idx + 1])
-                        nxt_filled_trim = [s for s in nxt_trim if s]
-                        merged_trim = overflow_trim + nxt_filled_trim
-                        st.session_state["pb_racks"][current_pb_idx + 1] = (
-                            merged_trim + [""] * max(0, 216 - len(merged_trim))
-                        )[:216]
-                    st.session_state["pb_id_to_rack"] = {
-                        sid: ridx
-                        for ridx, rids in st.session_state["pb_racks"].items()
-                        for sid in rids if sid
-                    }
-                    _show_success(
-                        f"Rack trimmed to {len(kept_trim)} samples. "
-                        f"{len(overflow_trim)} sample(s) moved to Rack {current_pb_idx + 2}."
-                    )
-                    st.rerun()
-
-                # Visualization uses the live editor state
-                display_ids_pb = [
-                    str(v).strip() if pd.notna(v) and str(v).strip() else ""
-                    for v in edited_df_pb["Sample ID"]
-                ]
-            else:
-                display_ids_pb = rack_ids_current
-
-            # Build visualization (reuse pallet/packed info from shipment file if loaded)
-            not_manifest_set_pb = set(st.session_state.get("not_in_manifest", []))
-            pallet_map_pb = build_pallet_map(gs_df) if gs_df is not None else {}
-            packed_set_pb: Set[str] = set()
-            if gs_df is not None and "Samples Packed?" in gs_df.columns and "Sample ID" in gs_df.columns:
-                _pbpm = gs_df["Samples Packed?"].fillna("").astype(str).str.strip().ne("")
-                packed_set_pb = set(
-                    gs_df.loc[_pbpm, "Sample ID"].dropna().astype(str).str.strip()
-                )
-
-            # Hide/strikethrough toggles (mirrors the range-based rack controls)
-            pb_hide_packed = st.toggle(
-                "Hide packed samples", value=False, key="pb_hide_packed"
-            )
-            if pb_hide_packed:
-                display_ids_pb = [
-                    "" if sid in packed_set_pb else sid for sid in display_ids_pb
-                ]
-                packed_set_pb_display: Set[str] = set()
-            else:
-                pb_show_strikethrough = st.toggle(
-                    "Show strikethrough on packed samples",
-                    value=True,
-                    key="pb_show_strikethrough",
-                )
-                packed_set_pb_display = packed_set_pb if pb_show_strikethrough else set()
-
-            rack_html_pb = build_rack_html(
-                display_ids_pb,
-                not_manifest_set_pb,
-                pallet_map=pallet_map_pb,
-                packed_set=packed_set_pb_display,
-                digits_to_show=3,
-                fill_value="–",
-                title=f"Rack {current_pb_idx + 1} of {len(pb_racks)} (Pre-built)",
-                date_range_str=_pb_date_range_str,
-            )
-            st.markdown(rack_html_pb, unsafe_allow_html=True)
-
     if nav_section == "Visual Inspection Labels" and us_df is not None:
         _subheader("Visual Inspection Labels")
         st.write(
@@ -2777,10 +2501,70 @@ header { visibility: visible; }
             "are combined and deduplicated."
         )
 
-        qc_pdf_files = st.file_uploader(
+        # ── local upload ────────────────────────────────────────────────────
+        qc_pdf_local = st.file_uploader(
             "Upload QC Report PDF(s)", type=["pdf"], key="qc_pdf",
             accept_multiple_files=True,
         )
+
+        # ── Supabase: save + load from storage ──────────────────────────────
+        _qc_ls_key = "_sb_ls_qc_pdf"
+        qc_pdf_files = list(qc_pdf_local) if qc_pdf_local else []
+
+        if _sb_client:
+            # refresh listing once per session (or after a save)
+            if _qc_ls_key not in st.session_state:
+                st.session_state[_qc_ls_key] = _sb_list_files(_sb_client, "qc-reports")
+            _qc_sb_files: List[str] = st.session_state[_qc_ls_key]
+
+            # save freshly uploaded PDFs to storage
+            if qc_pdf_local:
+                if st.button(
+                    f"Save {len(qc_pdf_local)} PDF(s) to storage",
+                    key="qc_pdf_sb_save",
+                ):
+                    _qc_saved, _qc_failed = [], []
+                    for _qf in qc_pdf_local:
+                        _qf.seek(0)
+                        _res = _sb_upload(
+                            _sb_client, f"qc-reports/{_qf.name}",
+                            _qf.read(), "application/pdf",
+                        )
+                        _qf.seek(0)
+                        (_qc_saved if _res is True else _qc_failed).append(_qf.name)
+                    if _qc_saved:
+                        _show_success(f"Saved: {', '.join(_qc_saved)}")
+                        st.session_state[_qc_ls_key] = _sb_list_files(_sb_client, "qc-reports")
+                    if _qc_failed:
+                        _show_error(f"Failed: {', '.join(_qc_failed)}")
+
+            # load previously stored PDFs (only when nothing is locally uploaded)
+            if _qc_sb_files:
+                _qc_sel = st.multiselect(
+                    "Or load from storage",
+                    options=_qc_sb_files,
+                    key="qc_pdf_sb_sel",
+                    disabled=bool(qc_pdf_local),
+                    help="Disabled while a file is uploaded above — clear the uploader first.",
+                )
+                if _qc_sel and not qc_pdf_local:
+                    for _qfn in _qc_sel:
+                        _qc_cache = f"_sb_qc_{_qfn}"
+                        if _qc_cache not in st.session_state:
+                            _raw = _sb_download(_sb_client, f"qc-reports/{_qfn}")
+                            if _raw:
+                                st.session_state[_qc_cache] = _raw
+                        if _qc_cache in st.session_state:
+                            # wrap bytes in a BytesIO-like object with a .name attribute
+                            class _NamedBytesIO(io.BytesIO):
+                                pass
+                            _bio = _NamedBytesIO(st.session_state[_qc_cache])
+                            _bio.name = _qfn
+                            qc_pdf_files.append(_bio)
+            else:
+                _show_caption("No PDFs saved in storage yet.")
+        else:
+            _show_caption("Connect Supabase to save/load PDFs from storage.")
 
         if qc_pdf_files:
             debug_mode = st.checkbox("Show debug info", value=False, key="qc_debug")
@@ -2962,7 +2746,7 @@ header { visibility: visible; }
                         key="qc_cmp_csv_dl",
                     )
 
-    if nav_section in ["Manual racks/Unit Status Check", "Pre-built Rack Browser", "Visual Inspection Labels"] and us_df is None:
+    if nav_section in ["Manual racks/Unit Status Check", "Visual Inspection Labels"] and us_df is None:
         _show_info("Please upload a unit status file to use this section.")
 
     # =========================================================================
@@ -3460,12 +3244,20 @@ header { visibility: visible; }
         _subheader("Storage Manager")
 
         if _sb_client is None:
-            _show_warning("Supabase is not connected. Configure SUPABASE_URL and SUPABASE_KEY in secrets.toml to use this section.")
+            st.error(
+                "Supabase is not connected. "
+                + (f"**Reason:** {_sb_error}" if _sb_error else "Check SUPABASE_URL and SUPABASE_KEY in secrets.")
+            )
+            if st.button("Retry connection", key="_sm_retry_conn"):
+                for _k in ["_sb_client_cache", "_sb_client_error"]:
+                    st.session_state.pop(_k, None)
+                st.rerun()
         else:
             _sm_folders = {
                 "Unit Status (2026)": ("unit-status", ["csv", "xlsx", "xls"]),
                 "Grifols Shipment": ("shipment", ["csv", "xlsx", "xls"]),
                 "Master Sheet": ("master-sheet", ["csv"]),
+                "QC Reports": ("qc-reports", ["pdf"]),
             }
 
             def _sm_file_mime(fname: str) -> str:
@@ -3594,7 +3386,14 @@ header { visibility: visible; }
                             _us_cols = list(_us_df_edit.columns)
                             _show_caption(f"{len(_us_df_edit)} rows · {len(_us_cols)} columns")
 
-                            _tab_add, _tab_find = st.tabs(["Add Rows", "Find & Edit Row"])
+                            with st.expander("Preview last 10 rows", expanded=False):
+                                st.dataframe(
+                                    _us_df_edit.tail(10),
+                                    use_container_width=True,
+                                    hide_index=False,
+                                )
+
+                            _tab_add, _tab_find = st.tabs(["Add Rows", "Edit by Date"])
 
                             # ── Add Rows (paste) ─────────────────────────────
                             with _tab_add:
@@ -3666,62 +3465,69 @@ header { visibility: visible; }
                                         else:
                                             _show_error(f"Save failed: {_save_res}")
 
-                            # ── Find & Edit Row ──────────────────────────────
+                            # ── Edit by Date ─────────────────────────────────
                             with _tab_find:
-                                _ctrl_q = st.text_input(
-                                    "Control number (Donation # suffix, e.g. 002035)",
-                                    key="_sm_ctrl_q",
-                                    placeholder="002035",
-                                )
-                                if st.button("Search", key="_sm_ctrl_search_btn"):
-                                    if not _ctrl_q.strip():
-                                        _show_warning("Enter a control number to search.")
-                                    elif "Donation #" not in _us_cols:
-                                        _show_warning("Column 'Donation #' not found in this file.")
-                                    else:
-                                        _q = _ctrl_q.strip()
-                                        _mask = (
-                                            _us_df_edit["Donation #"]
-                                            .astype(str)
-                                            .str.strip()
-                                            .str.endswith(_q)
+                                if "Donation Date" not in _us_cols:
+                                    st.warning("Column 'Donation Date' not found in this file.")
+                                else:
+                                    _date_input_str = st.text_input(
+                                        "Donation date (dd.mm.yyyy)",
+                                        key="_sm_date_q",
+                                        placeholder="02.01.2026",
+                                    )
+                                    if st.button("Search by date", key="_sm_date_search_btn"):
+                                        _dq_stripped = _date_input_str.strip()
+                                        if not _dq_stripped:
+                                            _show_warning("Enter a date to search.")
+                                        else:
+                                            _target_date = _parse_donation_date(_dq_stripped)
+                                            if _target_date is None:
+                                                _show_warning(
+                                                    f"Could not parse '{_dq_stripped}'. "
+                                                    "Use dd.mm.yyyy, dd-mm-yyyy or dd/mm/yyyy."
+                                                )
+                                            else:
+                                                _date_mask = _us_df_edit["Donation Date"].apply(
+                                                    lambda _v: _parse_donation_date(_v) == _target_date
+                                                )
+                                                _found_idx = _us_df_edit.index[_date_mask].tolist()
+                                                st.session_state["_sm_found_idx"] = _found_idx
+                                                st.session_state["_sm_found_key"] = _us_df_key
+                                                st.session_state["_sm_found_date"] = _target_date.strftime("%d.%m.%Y")
+                                                if not _found_idx:
+                                                    _show_info(
+                                                        f"No rows found for "
+                                                        f"{_target_date.strftime('%d.%m.%Y')}."
+                                                    )
+
+                                    _found = st.session_state.get("_sm_found_idx", [])
+                                    _found_key = st.session_state.get("_sm_found_key", "")
+                                    _found_date_label = st.session_state.get("_sm_found_date", "")
+                                    # Clear if user switched to a different file
+                                    if _found_key != _us_df_key:
+                                        _found = []
+
+                                    if _found:
+                                        # Filter to rows still present in the DataFrame
+                                        _valid_found = [i for i in _found if i in _us_df_edit.index]
+                                        st.markdown(
+                                            f"**{len(_valid_found)} row(s)** for **{_found_date_label}** — "
+                                            "edit directly in the table then click Save."
                                         )
-                                        _found_idx = _us_df_edit.index[_mask].tolist()
-                                        st.session_state["_sm_found_idx"] = _found_idx
-                                        st.session_state["_sm_found_key"] = _us_df_key
-                                        if not _found_idx:
-                                            _show_info(f"No rows found where Donation # ends with '{_q}'.")
-
-                                _found = st.session_state.get("_sm_found_idx", [])
-                                _found_key = st.session_state.get("_sm_found_key", "")
-                                # Clear results if user switched to a different file
-                                if _found_key != _us_df_key:
-                                    _found = []
-
-                                for _fi, _fidx in enumerate(_found):
-                                    if _fidx not in _us_df_edit.index:
-                                        continue
-                                    st.markdown(f"**Match {_fi + 1}** — row index {_fidx}")
-                                    with st.form(f"_sm_edit_form_{_fi}_{_fidx}"):
-                                        _edit_vals: Dict[str, str] = {}
-                                        _ec_left = _us_cols[: len(_us_cols) // 2 + len(_us_cols) % 2]
-                                        _ec_right = _us_cols[len(_us_cols) // 2 + len(_us_cols) % 2 :]
-                                        _ef_left, _ef_right = st.columns(2)
-                                        for _col in _ec_left:
-                                            _edit_vals[_col] = _ef_left.text_input(
-                                                _col,
-                                                value=str(_us_df_edit.at[_fidx, _col]),
-                                                key=f"_sm_ef_{_fi}_{_fidx}_{_col}",
-                                            )
-                                        for _col in _ec_right:
-                                            _edit_vals[_col] = _ef_right.text_input(
-                                                _col,
-                                                value=str(_us_df_edit.at[_fidx, _col]),
-                                                key=f"_sm_ef_{_fi}_{_fidx}_{_col}",
-                                            )
-                                        if st.form_submit_button("Save Changes"):
+                                        _edit_subset = _us_df_edit.loc[_valid_found].copy()
+                                        _edited_subset = st.data_editor(
+                                            _edit_subset,
+                                            use_container_width=True,
+                                            hide_index=False,
+                                            key=f"_sm_date_editor_{_found_key}_{_found_date_label}",
+                                            num_rows="fixed",
+                                        )
+                                        if st.button("Save Changes", key="_sm_date_save_btn"):
                                             for _col in _us_cols:
-                                                _us_df_edit.at[_fidx, _col] = _edit_vals[_col]
+                                                if _col in _edited_subset.columns:
+                                                    _us_df_edit.loc[_valid_found, _col] = (
+                                                        _edited_subset[_col].values
+                                                    )
                                             _save_res = _sb_upload(
                                                 _sb_client,
                                                 f"unit-status/{_us_edit_sel}",
@@ -3730,7 +3536,10 @@ header { visibility: visible; }
                                             )
                                             if _save_res is True:
                                                 st.session_state[_us_df_key] = _us_df_edit
-                                                _show_success("Changes saved.")
+                                                _show_success(
+                                                    f"Saved {len(_valid_found)} row(s) for "
+                                                    f"{_found_date_label}."
+                                                )
                                                 st.rerun()
                                             else:
                                                 _show_error(f"Save failed: {_save_res}")

@@ -45,6 +45,7 @@ IDs, and (if a unit status file is supplied) the donation prefix and
 control number(s) for the unit status analysis.
 """
 
+import base64
 import datetime
 import hashlib
 import io
@@ -116,6 +117,7 @@ def _subheader(title: str) -> None:
     )
 
 
+@st.cache_data(show_spinner=False)
 def clean_unit_status(us_df: pd.DataFrame) -> pd.DataFrame:
     """Filter out rows from the unit status DataFrame based on status patterns.
 
@@ -331,6 +333,7 @@ def split_ids_by_prefix(pallet_df: pd.DataFrame) -> Tuple[List[str], List[str]]:
     return f25_ids, f26_ids
 
 
+@st.cache_data(show_spinner=False)
 def build_pallet_map(gs_df: pd.DataFrame) -> Dict[str, int]:
     """Return a dict mapping each Sample ID to its pallet number.
 
@@ -373,6 +376,7 @@ def build_pallet_map(gs_df: pd.DataFrame) -> Dict[str, int]:
     return pallet_map
 
 
+@st.cache_data(show_spinner=False)
 def generate_report_text(
     pallet_df: pd.DataFrame,
     pallet_size: int,
@@ -438,6 +442,7 @@ def generate_report_text(
     return report_text, f25_ids, f26_ids
 
 
+@st.cache_data(show_spinner=False)
 def process_unit_status_all(us_df: pd.DataFrame, prefix: str) -> Set[str]:
     """
     Build a 'to be removed' set across ALL rows (no date filter) for a given prefix.
@@ -572,6 +577,7 @@ def _parse_donation_date(raw) -> Optional[datetime.date]:
 
 # -----------------------------------------------------------------------------
 # Rack visualisation helper
+@st.cache_data(show_spinner=False)
 def build_rack_html(
     valid_ids: List[str],
     not_manifest_set: Set[str],
@@ -886,6 +892,7 @@ def _show_rack_fullscreen_dialog():
         st.info("No rack to display.")
 
 
+@st.cache_data(show_spinner=False)
 def build_vi_label_groups(
     us_df: pd.DataFrame,
     prefix: str,
@@ -1252,6 +1259,7 @@ def _vi_find_next_start(
     return None
 
 
+@st.cache_data(show_spinner=False)
 def build_qc_release_comparison(
     qc_df: pd.DataFrame,
     us_df: pd.DataFrame,
@@ -1345,6 +1353,78 @@ def build_qc_release_comparison(
     return pd.DataFrame(rows), detail
 
 
+@st.cache_data(show_spinner=False)
+def build_qc_packing_comparison(
+    qc_df: pd.DataFrame,
+    gs_df: pd.DataFrame,
+    us_df: Optional[pd.DataFrame] = None,
+) -> Tuple[pd.DataFrame, Dict]:
+    """Compare QC unit IDs against the Grifols shipment manifest by direct ID match.
+
+    Packed     = QC unit ID found in shipment file ``Sample ID`` column.
+    Not packed = QC unit ID absent from shipment file.
+
+    Donation dates for unpacked units come from the unit-status file because
+    the shipment-file dates can be unreliable.
+
+    Returns
+    -------
+    unpacked_df : pd.DataFrame
+        Columns ``Unit ID`` and ``Donation Date``.  Sorted by date then ID.
+    stats : dict
+        ``total_qc``, ``packed``, ``not_packed``,
+        ``not_packed_by_date`` (dict date_str → count).
+    """
+    qc_ids: List[str] = (
+        qc_df["Unit ID"].dropna().astype(str).str.strip().tolist()
+        if "Unit ID" in qc_df.columns else []
+    )
+
+    shipment_ids: Set[str] = set()
+    if gs_df is not None and "Sample ID" in gs_df.columns:
+        shipment_ids = set(gs_df["Sample ID"].dropna().astype(str).str.strip())
+
+    # Build date lookup from unit status (Donation # → "dd.mm.yyyy")
+    us_date_map: Dict[str, str] = {}
+    if (
+        us_df is not None
+        and "Donation #" in us_df.columns
+        and "Donation Date" in us_df.columns
+    ):
+        for uid, raw in zip(
+            us_df["Donation #"].fillna("").astype(str).str.strip(),
+            us_df["Donation Date"],
+        ):
+            if uid:
+                d = _parse_donation_date(raw)
+                if d:
+                    us_date_map[uid] = d.strftime("%d.%m.%Y")
+
+    not_packed_ids = [u for u in qc_ids if u not in shipment_ids]
+
+    not_packed_by_date: Dict[str, int] = {}
+    not_packed_rows: List[Dict] = []
+    for uid in not_packed_ids:
+        date_str = us_date_map.get(uid, "—")
+        not_packed_rows.append({"Unit ID": uid, "Donation Date": date_str})
+        not_packed_by_date[date_str] = not_packed_by_date.get(date_str, 0) + 1
+
+    not_packed_rows.sort(key=lambda r: (r["Donation Date"], r["Unit ID"]))
+
+    unpacked_df = (
+        pd.DataFrame(not_packed_rows)
+        if not_packed_rows
+        else pd.DataFrame(columns=["Unit ID", "Donation Date"])
+    )
+
+    return unpacked_df, {
+        "total_qc": len(qc_ids),
+        "packed": len(qc_ids) - len(not_packed_ids),
+        "not_packed": len(not_packed_ids),
+        "not_packed_by_date": not_packed_by_date,
+    }
+
+
 def parse_qc_report_pdf(pdf_file) -> pd.DataFrame:
     """Extract Unit ID and Don. date columns from a Grifols QC Report PDF.
 
@@ -1427,8 +1507,13 @@ def parse_qc_report_pdf(pdf_file) -> pd.DataFrame:
 _SUPABASE_BUCKET = "grifols"
 
 
+@st.cache_resource(show_spinner=False)
 def _get_supabase_client():
-    """Return a Supabase client if SUPABASE_URL / SUPABASE_KEY are in secrets."""
+    """Return a Supabase client if SUPABASE_URL / SUPABASE_KEY are in secrets.
+
+    Decorated with @st.cache_resource so the connection is created once and
+    reused across all reruns (avoids repeated TCP handshakes).
+    """
     try:
         from supabase import create_client
         url = st.secrets.get("SUPABASE_URL", "")
@@ -1503,6 +1588,157 @@ def _sb_delete(client, path: str):
     except Exception as e:
         return str(e)
 
+
+def _sb_get_qc_cache(client, pdf_name: str) -> Optional[pd.DataFrame]:
+    """Load cached QC extraction for pdf_name from Supabase (qc-cache/ folder).
+
+    Returns a DataFrame on hit, None on miss or error.
+    """
+    raw = _sb_download(client, f"qc-cache/{pdf_name}.json")
+    if raw is None:
+        return None
+    try:
+        return pd.read_json(io.BytesIO(raw), orient="records")
+    except Exception:
+        return None
+
+
+def _sb_save_qc_cache(client, pdf_name: str, df: pd.DataFrame) -> bool:
+    """Persist QC extraction result to Supabase (qc-cache/{pdf_name}.json).
+
+    Returns True on success, False on failure.
+    """
+    try:
+        json_bytes = df.to_json(orient="records").encode("utf-8")
+        return _sb_upload(client, f"qc-cache/{pdf_name}.json", json_bytes, "application/json") is True
+    except Exception:
+        return False
+
+
+def _sb_delete_qc_cache(client, pdf_name: str) -> bool:
+    """Delete the cached extraction for pdf_name. Returns True on success."""
+    return _sb_delete(client, f"qc-cache/{pdf_name}.json") is True
+
+
+# ---------------------------------------------------------------------------
+# Excel multi-sheet helper
+# ---------------------------------------------------------------------------
+_EXCEL_PRIORITY_COLS: Set[str] = {
+    "Donor ID", "Donation Date", "Status", "Donation #",
+    "Donor Status", "Redo Panel",
+    "Sample ID", "Pallet", "Comments",
+}
+
+
+def _score_sheet_name(sheets_raw: Dict[str, pd.DataFrame]) -> str:
+    """Return the sheet name whose first 10 rows contain the most priority column values."""
+    _best, _bscore = None, -1
+    for _sn, _sdf in sheets_raw.items():
+        _vals: Set[str] = set()
+        for _si in range(min(10, len(_sdf))):
+            _vals.update(
+                str(v).strip() for v in _sdf.iloc[_si] if pd.notna(v) and str(v).strip()
+            )
+        _sc = len(_vals & _EXCEL_PRIORITY_COLS)
+        if _sc > _bscore:
+            _bscore = _sc
+            _best = _sn
+    return _best or next(iter(sheets_raw))
+
+
+def _read_excel_smart(
+    buf, dtype=str, sheet_strategy: str = "score", explicit_sheet: str = ""
+) -> pd.DataFrame:
+    """Read an Excel file, selecting the best sheet and auto-detecting the header row.
+
+    Two-pass approach:
+      1. Read all sheets with ``header=None, dtype=str`` for structure analysis
+         (finds the right sheet AND the real header row even when decorative
+         title rows appear above the column headers).
+      2. Re-read only the chosen sheet with the caller's ``dtype`` and the
+         detected ``header=`` offset, preserving original column dtypes.
+
+    explicit_sheet: when non-empty, load that sheet name exactly (case-
+                    insensitive).  Falls through to sheet_strategy on miss.
+    sheet_strategy:
+        "score"       — pick the sheet whose first rows contain the most
+                        known column names.
+        "latest"      — sort sheet names alphabetically, pick the last one.
+        "unit_status" — prefer "UNIT STATUS {year}", then any "UNIT STATUS *",
+                        then fall back to score.
+    """
+    # Slurp bytes once so we can read the buffer twice
+    if isinstance(buf, io.BytesIO):
+        _xb = buf.getvalue()
+    elif isinstance(buf, (bytes, bytearray)):
+        _xb = bytes(buf)
+    else:
+        _xb = buf.read()
+        if hasattr(buf, "seek"):
+            buf.seek(0)
+
+    # Pass 1 — all sheets, no header assumption, everything as strings
+    try:
+        _raw: Dict[str, pd.DataFrame] = pd.read_excel(
+            io.BytesIO(_xb), sheet_name=None, header=None, dtype=str
+        )
+    except Exception:
+        return pd.DataFrame()
+    if not _raw:
+        return pd.DataFrame()
+
+    # --- pick target sheet name ---
+    _chosen: Optional[str] = None
+    if explicit_sheet:
+        _tgt = explicit_sheet.strip().upper()
+        _chosen = next((n for n in _raw if n.strip().upper() == _tgt), None)
+
+    if _chosen is None:
+        if sheet_strategy == "latest":
+            _chosen = sorted(_raw)[-1]
+        elif sheet_strategy == "unit_status":
+            _yr = str(datetime.date.today().year)
+            for _n in _raw:
+                if _n.strip().upper() == f"UNIT STATUS {_yr}":
+                    _chosen = _n
+                    break
+            if _chosen is None:
+                for _n in _raw:
+                    if "UNIT STATUS" in _n.strip().upper():
+                        _chosen = _n
+                        break
+            if _chosen is None:
+                _chosen = _score_sheet_name(_raw)
+        else:
+            _chosen = _score_sheet_name(_raw)
+
+    # --- detect real header row (handles decorative title rows above data) ---
+    _sheet_raw = _raw[_chosen]
+    _hdr_row = 0
+    for _ri in range(min(10, len(_sheet_raw))):
+        _rv = {
+            str(v).strip() for v in _sheet_raw.iloc[_ri]
+            if pd.notna(v) and str(v).strip()
+        }
+        if len(_rv & _EXCEL_PRIORITY_COLS) >= 2:
+            _hdr_row = _ri
+            break
+
+    # Pass 2 — re-read only the chosen sheet with correct dtype and header offset
+    _kw = {"dtype": dtype} if dtype is not None else {}
+    try:
+        _df = pd.read_excel(
+            io.BytesIO(_xb), sheet_name=_chosen, header=_hdr_row, **_kw
+        )
+        return _df.fillna("")
+    except Exception:
+        # Fallback: build from the raw string data already in memory
+        _data = _sheet_raw.iloc[_hdr_row + 1:].copy().reset_index(drop=True)
+        _data.columns = [
+            str(v).strip() if (pd.notna(v) and str(v).strip()) else f"_c{j}"
+            for j, v in enumerate(_sheet_raw.iloc[_hdr_row])
+        ]
+        return _data.fillna("")
 
 
 def _sb_file_widget(
@@ -1808,12 +2044,9 @@ header { visibility: visible; }
 </div>
 """, unsafe_allow_html=True)
 
-    # Initialise Supabase once per session (None when secrets are not configured)
-    if "_sb_client_cache" not in st.session_state:
-        st.session_state["_sb_client_cache"] = _get_supabase_client()
-        st.session_state["_sb_client_error"] = _get_supabase_error()
-    _sb_client = st.session_state["_sb_client_cache"]
-    _sb_error = st.session_state.get("_sb_client_error")
+    # _get_supabase_client is @st.cache_resource — returns the same instance every call.
+    _sb_client = _get_supabase_client()
+    _sb_error = _get_supabase_error() if _sb_client is None else ""
 
     shipment_file = _sb_file_widget(
         "Upload Grifols shipment file",
@@ -1822,6 +2055,28 @@ header { visibility: visible; }
         ["csv", "xlsx", "xls"],
         _sb_client,
     )
+    # Shipment ID input — only shown when an Excel file is loaded
+    _gs_explicit_sheet = ""
+    if shipment_file is not None:
+        _gs_fname = getattr(shipment_file, "name", "") or ""
+        if _gs_fname.lower().endswith((".xlsx", ".xls")):
+            try:
+                _gs_peek = shipment_file.read()
+                shipment_file.seek(0)
+                _gs_xl_names = pd.ExcelFile(io.BytesIO(_gs_peek)).sheet_names
+                _gs_shipment_sheets = [n for n in _gs_xl_names if "SHIPMENT" in n.upper()]
+                _gs_sheet_hint = "Available: " + ", ".join(_gs_shipment_sheets) if _gs_shipment_sheets else ""
+            except Exception:
+                _gs_sheet_hint = ""
+            _gs_id_raw = st.text_input(
+                "Shipment ID",
+                key="gs_shipment_id",
+                placeholder="e.g. 4000079",
+                help=_gs_sheet_hint or "Enter the shipment number to load sheet 'SHIPMENT <ID>'.",
+            ).strip()
+            if _gs_id_raw:
+                _gs_explicit_sheet = f"SHIPMENT {_gs_id_raw}"
+
     unit_status_file = _sb_file_widget(
         "Upload unit status file (optional)",
         "unit-status",
@@ -1830,15 +2085,19 @@ header { visibility: visible; }
         _sb_client,
     )
 
-    def _read_upload(uploaded_file, dtype=None) -> Optional[pd.DataFrame]:
+    def _read_upload(
+        uploaded_file, dtype=None, sheet_strategy: str = "score", explicit_sheet: str = ""
+    ) -> Optional[pd.DataFrame]:
         """Read an uploaded file as a DataFrame, supporting CSV and Excel."""
         if uploaded_file is None:
             return None
         name = uploaded_file.name.lower()
         try:
             if name.endswith((".xlsx", ".xls")):
-                kwargs = {"dtype": dtype} if dtype else {}
-                return pd.read_excel(uploaded_file, **kwargs)
+                return _read_excel_smart(
+                    uploaded_file, dtype=dtype,
+                    sheet_strategy=sheet_strategy, explicit_sheet=explicit_sheet,
+                )
             else:
                 kwargs = {"dtype": dtype} if dtype else {}
                 return pd.read_csv(uploaded_file, **kwargs)
@@ -1847,8 +2106,8 @@ header { visibility: visible; }
             return None
 
     # Load the DataFrames
-    gs_df = _read_upload(shipment_file)
-    us_df = _read_upload(unit_status_file, dtype=str)
+    gs_df = _read_upload(shipment_file, sheet_strategy="latest", explicit_sheet=_gs_explicit_sheet)
+    us_df = _read_upload(unit_status_file, dtype=str, sheet_strategy="unit_status")
 
     # Normalize whitespace in key ID columns right after loading so all
     # downstream comparisons are consistent.
@@ -2004,57 +2263,6 @@ header { visibility: visible; }
                     hide_index=True,
                 )
 
-        # ── Box Number Generator ──────────────────────────────────────────
-        _subheader("Box Number Generator")
-        _bg_col1, _bg_col2 = st.columns(2)
-        with _bg_col1:
-            _bg_start = st.number_input(
-                "Starting box number", min_value=1, step=1, value=1,
-                key="bg_start", format="%d",
-            )
-        with _bg_col2:
-            _bg_count = st.number_input(
-                "Number of boxes to generate", min_value=1, step=1, value=10,
-                key="bg_count", format="%d",
-            )
-
-        _bg_preview_rows = int(_bg_count) * 12
-        _show_caption(
-            f"Will generate {int(_bg_count)} box(es) × 12 = "
-            f"{_bg_preview_rows} rows  "
-            f"(Box {int(_bg_start)} → Box {int(_bg_start) + int(_bg_count) - 1})"
-        )
-
-        if st.button("Generate & Download", key="btn_box_gen"):
-            _box_numbers = []
-            for _bn in range(int(_bg_start), int(_bg_start) + int(_bg_count)):
-                _box_numbers.extend([_bn] * 12)
-            _bg_df = pd.DataFrame({"Box #": _box_numbers})
-            _bg_csv = _bg_df.to_csv(index=False).encode("utf-8")
-            st.session_state["_bg_csv"] = _bg_csv
-            st.session_state["_bg_label"] = (
-                f"box_{int(_bg_start)}_to_{int(_bg_start) + int(_bg_count) - 1}.csv"
-            )
-
-        if "_bg_csv" in st.session_state:
-            st.download_button(
-                label="Download box numbers CSV",
-                data=st.session_state["_bg_csv"],
-                file_name=st.session_state["_bg_label"],
-                mime="text/csv",
-                key="btn_box_gen_dl",
-            )
-            # quick preview — first box + last box
-            with st.expander("Preview first & last rows"):
-                _prev_nums = []
-                for _bn in range(int(_bg_start), int(_bg_start) + int(_bg_count)):
-                    _prev_nums.extend([_bn] * 12)
-                _prev_df = pd.DataFrame({"Box #": _prev_nums})
-                st.dataframe(
-                    pd.concat([_prev_df.head(12), _prev_df.tail(12)]),
-                    use_container_width=True,
-                    hide_index=True,
-                )
 
         # Optionally show a preview of the unit status file if uploaded
         if us_df is not None:
@@ -2088,6 +2296,62 @@ header { visibility: visible; }
                 st.session_state["pallet_f25_ids"] = f25_ids
                 st.session_state["pallet_f26_ids"] = f26_ids
                 st.session_state["pallet_no_last"] = int(pallet_no)
+
+                # ── Donation date breakdown for this pallet ────────────────
+                # Dates come from the unit status file (Donation # → Donation
+                # Date) because shipment-file dates can be unreliable.
+                _pallet_date_bd = None
+                if (
+                    us_df is not None
+                    and "Donation #" in us_df.columns
+                    and "Donation Date" in us_df.columns
+                ):
+                    _pd_date_map = dict(zip(
+                        us_df["Donation #"].fillna("").astype(str).str.strip(),
+                        us_df["Donation Date"].map(_parse_donation_date),
+                    ))
+                    _pd_all_ids = (
+                        pallet_df_raw["Sample ID"].dropna().astype(str).str.strip().tolist()
+                    )
+                    _pd_to_pack_ids = set(
+                        pallet_df["Sample ID"].dropna().astype(str).str.strip()
+                    )
+                    _pd_total: Dict[str, int] = {}
+                    _pd_to_pack: Dict[str, int] = {}
+                    _pd_parsed: List[datetime.date] = []
+                    for _sid in _pd_all_ids:
+                        if not _sid:
+                            continue
+                        _d = _pd_date_map.get(_sid)
+                        if _d:
+                            _pd_parsed.append(_d)
+                        _dk = _d.strftime("%d.%m.%Y") if _d else "Unknown"
+                        _pd_total[_dk] = _pd_total.get(_dk, 0) + 1
+                        if _sid in _pd_to_pack_ids:
+                            _pd_to_pack[_dk] = _pd_to_pack.get(_dk, 0) + 1
+                    if _pd_total:
+                        _pd_keys = sorted(
+                            (k for k in _pd_total if k != "Unknown"),
+                            key=lambda s: datetime.datetime.strptime(s, "%d.%m.%Y"),
+                        )
+                        if "Unknown" in _pd_total:
+                            _pd_keys.append("Unknown")
+                        _pallet_date_bd = {
+                            "range": (
+                                f"{min(_pd_parsed).strftime('%d.%m.%Y')} – "
+                                f"{max(_pd_parsed).strftime('%d.%m.%Y')}"
+                                if _pd_parsed else "Unknown"
+                            ),
+                            "rows": [
+                                {
+                                    "Donation Date": _dk,
+                                    "Samples in pallet": _pd_total[_dk],
+                                    "To pack": _pd_to_pack.get(_dk, 0),
+                                }
+                                for _dk in _pd_keys
+                            ],
+                        }
+                st.session_state["pallet_date_breakdown"] = _pallet_date_bd
             except ValueError as ve:
                 _show_error(str(ve))
             except Exception as e:
@@ -2134,7 +2398,22 @@ header { visibility: visible; }
                 columns=["Field", "Value"],
             )
             st.table(summary_df)
-            
+
+            # ── Donation date breakdown ─────────────────────────────────
+            _pd_bd = st.session_state.get("pallet_date_breakdown")
+            if _pd_bd:
+                st.markdown(f"**Samples from:** {_pd_bd['range']}")
+                st.dataframe(
+                    pd.DataFrame(_pd_bd["rows"]),
+                    hide_index=True,
+                    use_container_width=True,
+                )
+            elif us_df is None:
+                _show_caption(
+                    "Upload a unit status file to see the donation date range "
+                    "and per-day sample counts for this pallet."
+                )
+
             # Optional: keep the original text (collapsed)
             with st.expander("Show raw report text"):
                 st.code(report_text)
@@ -2156,6 +2435,35 @@ header { visibility: visible; }
                         st.write("No F26 IDs found.")
     elif nav_section == "Pallet Report":
         _show_info("Please upload a Grifols shipment file to begin the pallet report.")
+
+    # ── Box Number Generator — always visible in Pallet Report ───────────────
+    if nav_section == "Pallet Report":
+        _subheader("Box Number Generator")
+        _bg_col1, _bg_col2 = st.columns(2)
+        with _bg_col1:
+            _bg_start = st.number_input(
+                "Starting box number", min_value=1, step=1, value=1,
+                key="bg_start", format="%d",
+            )
+        with _bg_col2:
+            _bg_count = st.number_input(
+                "Number of boxes to generate", min_value=1, step=1, value=10,
+                key="bg_count", format="%d",
+            )
+        _show_caption(
+            f"Will generate {int(_bg_count)} box(es) × 12 = {int(_bg_count) * 12} rows  "
+            f"(Box {int(_bg_start)} → Box {int(_bg_start) + int(_bg_count) - 1})"
+        )
+        if st.button("Generate Box Numbers", key="btn_box_gen"):
+            # Copy-friendly block — Streamlit renders st.code() with a built-in
+            # copy button so the user can paste numbers straight into Excel.
+            _copy_nums = []
+            for _bn in range(int(_bg_start), int(_bg_start) + int(_bg_count)):
+                _copy_nums.extend([str(_bn)] * 12)
+            st.session_state["_bg_copy_text"] = "\n".join(_copy_nums)
+        if "_bg_copy_text" in st.session_state:
+            with st.expander("Copy box numbers (paste into Excel)", expanded=True):
+                st.code(st.session_state["_bg_copy_text"], language=None)
 
     # If unit status CSV is loaded, provide inputs and allow control number checks
     if nav_section == "Manual racks/Unit Status Check" and us_df is not None:
@@ -2338,6 +2646,46 @@ header { visibility: visible; }
                 fill_value="–",
             )
             st.markdown(_rack_html, unsafe_allow_html=True)
+
+            # ── Date breakdown — how many samples per donation date need packing ──
+            if us_df is not None and "Donation #" in us_df.columns and "Donation Date" in us_df.columns:
+                _us_date_map = dict(zip(
+                    us_df["Donation #"].fillna("").astype(str).str.strip(),
+                    us_df["Donation Date"].map(_parse_donation_date),
+                ))
+                _packed_set_rack = _rd["packed_set"]
+                _date_total: Dict[str, int] = {}
+                _date_to_pack: Dict[str, int] = {}
+                for _sid in _rd["valid_ids"]:
+                    if not _sid:
+                        continue
+                    _d = _us_date_map.get(_sid)
+                    _dk = _d.strftime("%d.%m.%Y") if _d else "Unknown"
+                    _date_total[_dk] = _date_total.get(_dk, 0) + 1
+                    if _sid not in _packed_set_rack:
+                        _date_to_pack[_dk] = _date_to_pack.get(_dk, 0) + 1
+                if _date_total:
+                    _total_samples = sum(_date_total.values())
+                    _total_to_pack = sum(_date_to_pack.values())
+                    with st.expander(
+                        f"Rack samples by donation date — "
+                        f"{_total_to_pack} to pack / {_total_samples} total"
+                    ):
+                        _date_rows = [
+                            {
+                                "Donation Date": _dk,
+                                "Total in rack": _date_total[_dk],
+                                "Already packed": _date_total[_dk] - _date_to_pack.get(_dk, 0),
+                                "To pack": _date_to_pack.get(_dk, _date_total[_dk]),
+                            }
+                            for _dk in sorted(_date_total)
+                        ]
+                        st.dataframe(
+                            pd.DataFrame(_date_rows),
+                            hide_index=True,
+                            use_container_width=True,
+                        )
+
             # ── Fullscreen / expand button (especially useful on mobile) ──
             if st.button(
                 "⛶  Expand rack (fullscreen view)",
@@ -2443,6 +2791,7 @@ header { visibility: visible; }
             ).strip()
 
         if st.button("Generate Visual Inspection Labels PDF", key="btn_vi_labels"):
+            st.session_state.pop("vi_pdf_result", None)
             if not vi_start_id:
                 _show_error("Please enter a start donation ID.")
             else:
@@ -2488,24 +2837,20 @@ header { visibility: visible; }
                             _saved_ok = _vi_gist_save(_vi_state)
                             st.session_state["vi_gist_state"] = _vi_state
                             if _saved_ok:
-                                _show_success(
+                                _vi_msg = (
                                     f"Generated {len(vi_groups)} label(s). "
                                     f"Next session will auto-start from the continuation point."
                                 )
+                                _vi_msg_kind = "success"
                             else:
-                                _show_warning(
+                                _vi_msg = (
                                     f"Generated {len(vi_groups)} label(s) but could not save state "
                                     f"(check GITHUB_TOKEN and GIST_ID in Streamlit secrets)."
                                 )
+                                _vi_msg_kind = "warning"
                         else:
-                            _show_success(f"Generated {len(vi_groups)} label(s).")
-                        st.download_button(
-                            label=f"⬇ Download PDF ({len(vi_groups)} label pages)",
-                            data=vi_pdf,
-                            file_name="vi_labels.pdf",
-                            mime="application/pdf",
-                            key="vi_pdf_dl",
-                        )
+                            _vi_msg = f"Generated {len(vi_groups)} label(s)."
+                            _vi_msg_kind = "success"
                         # Preview table
                         _prev = []
                         for _g in vi_groups:
@@ -2529,13 +2874,81 @@ header { visibility: visible; }
                                 "Total rows": len(_g["rows"]),
                                 "Complete": "✓" if _g["is_complete"] else "(partial)",
                             })
-                        st.table(pd.DataFrame(_prev))
+                        # Keep result in session state so the Download / Print
+                        # buttons and preview survive Streamlit reruns
+                        st.session_state["vi_pdf_result"] = {
+                            "pdf": vi_pdf,
+                            "n_groups": len(vi_groups),
+                            "msg": _vi_msg,
+                            "msg_kind": _vi_msg_kind,
+                            "preview": _prev,
+                        }
                 except ImportError as _e:
                     _show_error(str(_e))
                 except ValueError as _e:
                     _show_error(str(_e))
                 except Exception as _e:
                     st.exception(_e)
+
+        _vi_res = st.session_state.get("vi_pdf_result")
+        if _vi_res:
+            if _vi_res["msg_kind"] == "warning":
+                _show_warning(_vi_res["msg"])
+            else:
+                _show_success(_vi_res["msg"])
+            _dl_col, _pr_col = st.columns([1, 1])
+            with _dl_col:
+                st.download_button(
+                    label=f"⬇ Download PDF ({_vi_res['n_groups']} label pages)",
+                    data=_vi_res["pdf"],
+                    file_name="vi_labels.pdf",
+                    mime="application/pdf",
+                    key="vi_pdf_dl",
+                )
+            with _pr_col:
+                _vi_b64 = base64.b64encode(_vi_res["pdf"]).decode()
+                _vi_print_html = """
+<button onclick="printVI()" style="
+  background:#1e6fbf;color:#fff;border:none;padding:0.45rem 1rem;
+  border-radius:0.375rem;cursor:pointer;font-size:0.875rem;
+  font-family:sans-serif;width:100%;margin-top:4px;">
+  &#128438;&nbsp;Print PDF
+</button>
+<script>
+var _viUrl=null;
+function _viBlobUrl(){
+  if(_viUrl)return _viUrl;
+  var bin=atob("__VI_B64__");
+  var arr=new Uint8Array(bin.length);
+  for(var i=0;i<bin.length;i++)arr[i]=bin.charCodeAt(i);
+  _viUrl=URL.createObjectURL(new Blob([arr],{type:"application/pdf"}));
+  return _viUrl;
+}
+function printVI(){
+  var url=_viBlobUrl();
+  // Firefox cannot print a PDF from a hidden iframe - open a tab instead
+  if(navigator.userAgent.toLowerCase().indexOf("firefox")>-1){
+    window.open(url,"_blank");
+    return;
+  }
+  var old=document.getElementById("vi-print-frame");
+  if(old)old.parentNode.removeChild(old);
+  var f=document.createElement("iframe");
+  f.id="vi-print-frame";
+  f.style.cssText="position:fixed;right:0;bottom:0;width:0;height:0;border:0;";
+  f.onload=function(){
+    setTimeout(function(){
+      try{f.contentWindow.focus();f.contentWindow.print();}
+      catch(e){window.open(url,"_blank");}
+    },200);
+  };
+  f.src=url;
+  document.body.appendChild(f);
+}
+</script>
+""".replace("__VI_B64__", _vi_b64)
+                st.components.v1.html(_vi_print_html, height=48)
+            st.table(pd.DataFrame(_vi_res["preview"]))
 
     if nav_section == "QC Report PDF Extractor":
         _subheader("QC Report PDF Extractor")
@@ -2613,16 +3026,63 @@ header { visibility: visible; }
         if qc_pdf_files:
             debug_mode = st.checkbox("Show debug info", value=False, key="qc_debug")
 
+            # ── Cache status preview (checks Supabase once per file set) ────────
+            if _sb_client:
+                _cache_key = "_qc_cache_status_" + "_".join(
+                    sorted(f.name for f in qc_pdf_files)
+                )
+                if _cache_key not in st.session_state:
+                    st.session_state[_cache_key] = {
+                        f.name: _sb_get_qc_cache(_sb_client, f.name) is not None
+                        for f in qc_pdf_files
+                    }
+                _cs: Dict[str, bool] = st.session_state[_cache_key]
+                _n_cached = sum(_cs.values())
+                _n_new = len(qc_pdf_files) - _n_cached
+                if _n_cached:
+                    _show_info(
+                        f"**{_n_cached}** file(s) already cached — "
+                        f"only **{_n_new}** file(s) will be re-extracted from PDF."
+                        if _n_new else
+                        f"All {_n_cached} file(s) are cached — results load instantly."
+                    )
+                _cs_df = pd.DataFrame([
+                    {"File": name, "Status": "✓ cached" if hit else "⚡ will extract"}
+                    for name, hit in _cs.items()
+                ])
+                st.dataframe(_cs_df, hide_index=True, use_container_width=True)
+
+                # Per-file cache clear buttons
+                with st.expander("Re-extract a specific file (clear its cache)"):
+                    for _fname, _hit in _cs.items():
+                        if _hit:
+                            if st.button(f"Clear cache for {_fname}", key=f"qc_clr_{_fname}"):
+                                _sb_delete_qc_cache(_sb_client, _fname)
+                                st.session_state.pop(_cache_key, None)
+                                st.rerun()
+                        else:
+                            st.caption(f"{_fname} — not cached yet")
+
             if st.button("Extract Data", key="btn_extract_qc_pdf"):
                 try:
                     import pdfplumber as _plumber
                     all_frames: List[pd.DataFrame] = []
+                    _n_from_cache = 0
+                    _n_from_pdf = 0
                     for qc_pdf_file in qc_pdf_files:
+                        # ── Try cache first ──────────────────────────────────
+                        if _sb_client:
+                            _cached_df = _sb_get_qc_cache(_sb_client, qc_pdf_file.name)
+                            if _cached_df is not None and not _cached_df.empty:
+                                all_frames.append(_cached_df)
+                                _n_from_cache += 1
+                                continue
+
+                        # ── Extract from PDF ─────────────────────────────────
                         qc_pdf_file.seek(0)
 
                         if debug_mode:
                             st.markdown(f"#### Debug: {qc_pdf_file.name}")
-                            # ---- raw diagnosis ----
                             unit_id_pat_dbg = re.compile(r"^F\d{2}-\d{6}$")
                             date_pat_dbg = re.compile(r"^\d{2}\.\d{2}\.\d{4}$")
                             with _plumber.open(qc_pdf_file) as _pdf:
@@ -2647,6 +3107,16 @@ header { visibility: visible; }
                             _show_warning(f"No records found in **{qc_pdf_file.name}**.")
                         else:
                             all_frames.append(_df)
+                            _n_from_pdf += 1
+                            # ── Save to cache ────────────────────────────────
+                            if _sb_client:
+                                _sb_save_qc_cache(_sb_client, qc_pdf_file.name, _df)
+                                # Invalidate the status preview so it refreshes
+                                st.session_state.pop(
+                                    "_qc_cache_status_" + "_".join(
+                                        sorted(f.name for f in qc_pdf_files)
+                                    ), None
+                                )
 
                     if not all_frames:
                         _show_warning(
@@ -2658,12 +3128,16 @@ header { visibility: visible; }
                     else:
                         qc_df = pd.concat(all_frames, ignore_index=True).drop_duplicates()
                         st.session_state["qc_extracted_df"] = qc_df
-                        if len(qc_pdf_files) > 1:
-                            _show_info(
-                                f"Combined {len(qc_pdf_files)} file(s): "
-                                f"{sum(len(f) for f in all_frames)} total rows → "
-                                f"{len(qc_df)} after deduplication."
-                            )
+                        _parts = []
+                        if _n_from_cache:
+                            _parts.append(f"{_n_from_cache} from cache")
+                        if _n_from_pdf:
+                            _parts.append(f"{_n_from_pdf} extracted from PDF")
+                        _show_info(
+                            f"Combined {len(qc_pdf_files)} file(s) "
+                            f"({', '.join(_parts)}): "
+                            f"{len(qc_df)} record(s) after deduplication."
+                        )
                 except ImportError as _ie:
                     _show_error(str(_ie))
                 except Exception as _pe:
@@ -2683,7 +3157,53 @@ header { visibility: visible; }
             )
 
             # ------------------------------------------------------------------
-            # Release comparison against unit status
+            # Packing Status — compare QC unit IDs against shipment manifest
+            # ------------------------------------------------------------------
+            st.markdown("---")
+            _subheader("Packing Status")
+            if gs_df is None:
+                _show_info("Upload a **Grifols shipment file** to check which QC units are packed.")
+            else:
+                if st.button("Check Packing Status", key="btn_qc_pack_check"):
+                    try:
+                        _pack_df, _pack_stats = build_qc_packing_comparison(
+                            qc_result, gs_df, us_df=us_df
+                        )
+                        st.session_state["qc_pack_df"] = _pack_df
+                        st.session_state["qc_pack_stats"] = _pack_stats
+                    except Exception as _pe:
+                        st.exception(_pe)
+
+                if "qc_pack_stats" in st.session_state:
+                    _ps = st.session_state["qc_pack_stats"]
+                    _pc1, _pc2, _pc3 = st.columns(3)
+                    _pc1.metric("Total QC Units", _ps["total_qc"])
+                    _pc2.metric("Packed (in manifest)", _ps["packed"])
+                    _pc3.metric("Not packed", _ps["not_packed"])
+
+                    _pack_df = st.session_state["qc_pack_df"]
+                    if not _pack_df.empty:
+                        _npbd = _ps["not_packed_by_date"]
+                        _date_sum = pd.DataFrame(
+                            [{"Donation Date": k, "Not packed": v}
+                             for k, v in sorted(_npbd.items())]
+                        )
+                        st.markdown("**Not packed — by donation date (from unit status file)**")
+                        st.dataframe(_date_sum, hide_index=True, use_container_width=True)
+                        with st.expander(f"Full list — {_ps['not_packed']} unpacked unit(s)"):
+                            st.dataframe(_pack_df, hide_index=True, use_container_width=True)
+                        st.download_button(
+                            "Download not-packed list as CSV",
+                            data=_pack_df.to_csv(index=False).encode("utf-8"),
+                            file_name="qc_not_packed.csv",
+                            mime="text/csv",
+                            key="qc_not_packed_csv_dl",
+                        )
+                    else:
+                        _show_success("All QC units are present in the shipment manifest!")
+
+            # ------------------------------------------------------------------
+            # Release Comparison by Date — QC releases vs unit-status counts
             # ------------------------------------------------------------------
             st.markdown("---")
             _subheader("Release Comparison by Date")
@@ -2707,18 +3227,17 @@ header { visibility: visible; }
 
                 if "qc_comparison_df" in st.session_state:
                     cmp = st.session_state["qc_comparison_df"]
-                    cmp_detail = st.session_state.get("qc_comparison_detail", {})
-                    has_shipment_cols = "Packed" in cmp.columns and "Still to pack" in cmp.columns
 
-                    # Colour rows: green = all released, amber = partial, red = none
                     def _row_style(row):
                         if row["Valid units (US)"] == 0:
-                            colour = "#fff3cd"  # amber – date not in US file
+                            # amber — date not in US file or partial
+                            return ["background-color: #3d2800; color: #fcd34d"] * len(row)
                         elif row["Released (QC)"] >= row["Valid units (US)"]:
-                            colour = "#d4edda"  # green – fully released
+                            # green — fully released
+                            return ["background-color: #0c2d1a; color: #86efac"] * len(row)
                         else:
-                            colour = "#fff3cd"  # amber – partially released
-                        return [f"background-color: {colour}"] * len(row)
+                            # amber — partially released
+                            return ["background-color: #3d2800; color: #fcd34d"] * len(row)
 
                     st.dataframe(
                         cmp.style.apply(_row_style, axis=1),
@@ -2726,65 +3245,14 @@ header { visibility: visible; }
                         hide_index=True,
                     )
 
-                    # Totals
-                    total_released = int(cmp["Released (QC)"].sum())
-                    total_valid = int(cmp["Valid units (US)"].sum())
-                    total_pending = int(cmp["Pending"].sum())
+                    tc1, tc2, tc3 = st.columns(3)
+                    tc1.metric("Total Released (QC)", int(cmp["Released (QC)"].sum()))
+                    tc2.metric("Valid units (US)", int(cmp["Valid units (US)"].sum()))
+                    tc3.metric("Still Pending", int(cmp["Pending"].sum()))
 
-                    if has_shipment_cols:
-                        total_packed = int(cmp["Packed"].sum())
-                        total_still_to_pack = int(cmp["Still to pack"].sum())
-                        mc1, mc2, mc3, mc4 = st.columns(4)
-                        mc1.metric("Total Released (QC)", total_released)
-                        mc2.metric("Valid units (US)", total_valid)
-                        mc3.metric("Already packed", total_packed)
-                        mc4.metric("Still to pack", total_still_to_pack)
-                    else:
-                        tc1, tc2, tc3 = st.columns(3)
-                        tc1.metric("Total Released", total_released)
-                        tc2.metric("Total Valid (US)", total_valid)
-                        tc3.metric("Still Pending", total_pending)
-
-                    # Per-date expandable ID lists (only when shipment file loaded)
-                    if has_shipment_cols and cmp_detail:
-                        st.markdown("#### Per-date packing detail")
-                        for _, _cmp_row in cmp.iterrows():
-                            _ds = _cmp_row["Don. date"]
-                            _d = cmp_detail.get(_ds, {})
-                            _packed_list = _d.get("packed", [])
-                            _still_list = _d.get("still_to_pack", [])
-                            _label = (
-                                f"{_ds} — "
-                                f"{len(_packed_list)} packed, "
-                                f"{len(_still_list)} still to pack"
-                            )
-                            with st.expander(_label):
-                                _exp_c1, _exp_c2 = st.columns(2)
-                                with _exp_c1:
-                                    st.markdown("**Already packed**")
-                                    if _packed_list:
-                                        st.dataframe(
-                                            pd.DataFrame({"Unit ID": _packed_list}),
-                                            hide_index=True,
-                                            use_container_width=True,
-                                        )
-                                    else:
-                                        _show_caption("None")
-                                with _exp_c2:
-                                    st.markdown("**Still to pack**")
-                                    if _still_list:
-                                        st.dataframe(
-                                            pd.DataFrame({"Unit ID": _still_list}),
-                                            hide_index=True,
-                                            use_container_width=True,
-                                        )
-                                    else:
-                                        _show_caption("All packed!")
-
-                    cmp_csv = cmp.to_csv(index=False).encode("utf-8")
                     st.download_button(
                         label="Download comparison as CSV",
-                        data=cmp_csv,
+                        data=cmp.to_csv(index=False).encode("utf-8"),
                         file_name="qc_release_comparison.csv",
                         mime="text/csv",
                         key="qc_cmp_csv_dl",
@@ -2835,7 +3303,7 @@ header { visibility: visible; }
         )
 
         # Read 2025 unit status
-        _us_df_2025: Optional[pd.DataFrame] = _read_upload(_us_2025_file, dtype=str)
+        _us_df_2025: Optional[pd.DataFrame] = _read_upload(_us_2025_file, dtype=str, sheet_strategy="unit_status")
         if _us_df_2025 is not None and "Donation #" in _us_df_2025.columns:
             _us_df_2025["Donation #"] = _us_df_2025["Donation #"].astype(str).str.strip()
 
@@ -3293,8 +3761,7 @@ header { visibility: visible; }
                 + (f"**Reason:** {_sb_error}" if _sb_error else "Check SUPABASE_URL and SUPABASE_KEY in secrets.")
             )
             if st.button("Retry connection", key="_sm_retry_conn"):
-                for _k in ["_sb_client_cache", "_sb_client_error"]:
-                    st.session_state.pop(_k, None)
+                _get_supabase_client.clear()
                 st.rerun()
         else:
             _sm_folders = {
@@ -3311,12 +3778,12 @@ header { visibility: visible; }
                     return "application/vnd.ms-excel"
                 return "text/csv"
 
-            def _sm_load_df(raw: bytes, fname: str) -> Optional[pd.DataFrame]:
+            def _sm_load_df(raw: bytes, fname: str, sheet_strategy: str = "score") -> Optional[pd.DataFrame]:
                 import io as _io_sm
                 _f = _io_sm.BytesIO(raw)
                 try:
                     if fname.endswith((".xlsx", ".xls")):
-                        return pd.read_excel(_f, dtype=str).fillna("")
+                        return _read_excel_smart(_f, sheet_strategy=sheet_strategy)
                     for _enc in ("utf-8", "utf-8-sig", "cp1252", "latin-1"):
                         try:
                             _f.seek(0)
@@ -3417,7 +3884,7 @@ header { visibility: visible; }
                         if _us_df_key not in st.session_state:
                             _us_raw = _sb_download(_sb_client, f"unit-status/{_us_edit_sel}")
                             if _us_raw:
-                                _loaded = _sm_load_df(_us_raw, _us_edit_sel)
+                                _loaded = _sm_load_df(_us_raw, _us_edit_sel, sheet_strategy="unit_status")
                                 if _loaded is not None:
                                     st.session_state[_us_df_key] = _loaded
                                 else:
@@ -3663,7 +4130,7 @@ header { visibility: visible; }
                         if _gs_df_key not in st.session_state:
                             _gs_raw = _sb_download(_sb_client, f"shipment/{_gs_edit_sel}")
                             if _gs_raw:
-                                _loaded_gs = _sm_load_df(_gs_raw, _gs_edit_sel)
+                                _loaded_gs = _sm_load_df(_gs_raw, _gs_edit_sel, sheet_strategy="latest")
                                 if _loaded_gs is not None:
                                     st.session_state[_gs_df_key] = _loaded_gs
                                 else:

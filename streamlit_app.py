@@ -685,9 +685,9 @@ def build_rack_html(
   /* ── Rack container ────────────────────────────────── */
   .rack-wrap {{
     padding: 14px 14px 16px 14px;
-    border: 1px solid #30363d;
+    border: 1px solid #d0d7de;
     border-radius: 12px;
-    background: #161b22;
+    background: #f6f8fa;
     width: fit-content;
     max-width: 100%;
     overflow-x: auto;
@@ -697,7 +697,7 @@ def build_rack_html(
     font-weight: 800;
     font-size: 15px;
     margin: 0 0 10px 0;
-    color: #e6edf3;
+    color: #1f2328;
     letter-spacing: -0.02em;
   }}
 
@@ -708,7 +708,7 @@ def build_rack_html(
     align-items: center;
     font-size: 12px;
     font-weight: 600;
-    color: #c9d1d9;
+    color: #424a53;
     margin-bottom: 12px;
     flex-wrap: wrap;
   }}
@@ -741,7 +741,7 @@ def build_rack_html(
   .swatch.present           {{ background: #4ade80; }}
   .swatch.not-manifest      {{ background: #fbbf24; }}
   .swatch.samples-collected {{ background: #f87171; }}
-  .swatch.blank             {{ background: #21262d; border-color: rgba(255,255,255,0.1); }}
+  .swatch.blank             {{ background: #e7ecf0; border-color: rgba(0,0,0,0.12); }}
 
   /* Pallet swatches — one per hue family */
   .swatch.pallet-1  {{ background: #60a5fa; }}   /* sky blue   */
@@ -826,9 +826,9 @@ def build_rack_html(
 
   /* ── Empty cell ─────────────────────────────────────── */
   .rack-cell.blank {{
-    background: #1e2530;
-    color: #2d333b;
-    border-color: rgba(255,255,255,0.04);
+    background: #eef1f4;
+    color: #c6ccd2;
+    border-color: rgba(0,0,0,0.06);
   }}
 
   /* ── Packed strikethrough ───────────────────────────── */
@@ -874,7 +874,7 @@ def build_rack_html(
   /* ── Hover ──────────────────────────────────────────── */
   .rack-cell:hover {{
     transform: translateY(-2px);
-    filter: brightness(1.12) drop-shadow(0 4px 10px rgba(0,0,0,0.50));
+    filter: brightness(1.05) drop-shadow(0 4px 10px rgba(0,0,0,0.20));
     z-index: 1;
   }}
 </style>
@@ -2318,10 +2318,10 @@ def dp_process_pc_blut(
 
 _DP_RACK_CSS = """
 <style>
-  .dp-rack { display: inline-grid; gap: 3px; background: #161b22; padding: 8px; border-radius: 8px; border: 1px solid #30363d; margin-bottom: 14px; }
-  .dp-cell { background: #1e2530; border: 1px solid rgba(255,255,255,0.06); width: 36px; height: 34px; display: flex; align-items: center; justify-content: center; font-size: 10px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: #8b949e; box-sizing: border-box; border-radius: 4px; }
+  .dp-rack { display: inline-grid; gap: 3px; background: #f6f8fa; padding: 8px; border-radius: 8px; border: 1px solid #d0d7de; margin-bottom: 14px; }
+  .dp-cell { background: #eef1f4; border: 1px solid rgba(0,0,0,0.08); width: 36px; height: 34px; display: flex; align-items: center; justify-content: center; font-size: 10px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: #6b7280; box-sizing: border-box; border-radius: 4px; }
   .dp-filled { background: #60a5fa; border-color: #3b82f6; color: #1e3a8a; font-weight: 700; }
-  .dp-rack-title { font-weight: 700; font-size: 13px; color: #93c5fd; margin: 6px 0; }
+  .dp-rack-title { font-weight: 700; font-size: 13px; color: #0056b3; margin: 6px 0; }
 </style>
 """
 
@@ -2367,12 +2367,12 @@ def main() -> None:
 <style>
 :root {
     --accent:    #3b82f6;
-    --accent-bg: rgba(59,130,246,0.15);
-    --accent-hi: #93c5fd;
-    --bg-card:   #161b22;
-    --border:    #30363d;
-    --text:      #e6edf3;
-    --text-dim:  #8b949e;
+    --accent-bg: rgba(59,130,246,0.10);
+    --accent-hi: #1d4ed8;
+    --bg-card:   #f6f8fa;
+    --border:    #d0d7de;
+    --text:      #1f2328;
+    --text-dim:  #57606a;
 }
 
 /* ── Layout ──────────────────────────────────────────── */
@@ -2390,7 +2390,7 @@ header { visibility: visible; }
     margin-bottom: 1.25rem;
 }
 .gf-title-accent { width: 4px; height: 28px; background: var(--accent); border-radius: 2px; flex-shrink: 0; }
-.gf-title-text { font-size: 1.3rem; font-weight: 800; color: #e6edf3; letter-spacing: -0.03em; line-height: 1; }
+.gf-title-text { font-size: 1.3rem; font-weight: 800; color: #1f2328; letter-spacing: -0.03em; line-height: 1; }
 .gf-title-sub { font-size: 0.7rem; color: var(--text-dim); margin-top: 3px; letter-spacing: 0.02em; }
 
 /* ── Section headers ─────────────────────────────────── */
@@ -2401,7 +2401,7 @@ header { visibility: visible; }
     border-left: 3px solid var(--accent);
     border-radius: 0 5px 5px 0;
 }
-.gf-section-header span { font-size: 1rem; font-weight: 700; color: #e6edf3; letter-spacing: -0.01em; }
+.gf-section-header span { font-size: 1rem; font-weight: 700; color: #1f2328; letter-spacing: -0.01em; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -3603,13 +3603,13 @@ function printVI(){
                     def _row_style(row):
                         if row["Valid units (US)"] == 0:
                             # amber — date not in US file or partial
-                            return ["background-color: #3d2800; color: #fcd34d"] * len(row)
+                            return ["background-color: #fef3c7; color: #92400e"] * len(row)
                         elif row["Released (QC)"] >= row["Valid units (US)"]:
                             # green — fully released
-                            return ["background-color: #0c2d1a; color: #86efac"] * len(row)
+                            return ["background-color: #d1fae5; color: #065f46"] * len(row)
                         else:
                             # amber — partially released
-                            return ["background-color: #3d2800; color: #fcd34d"] * len(row)
+                            return ["background-color: #fef3c7; color: #92400e"] * len(row)
 
                     st.dataframe(
                         cmp.style.apply(_row_style, axis=1),

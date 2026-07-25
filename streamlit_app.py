@@ -59,6 +59,8 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
+import unit_status_db as usdb
+
 # ---------------------------------------------------------------------------
 # Feature flags
 # Set a section to False to hide it from the navigation bar.
@@ -1508,6 +1510,10 @@ def parse_qc_report_pdf(pdf_file) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 _SUPABASE_BUCKET = "grifols"
 
+# Storage folder holding the canonical Unit Status CSV database (one file per
+# year, named "Unit Status(UNIT STATUS <year>) ...csv").
+_US_FOLDER = "unit-status"
+
 
 @st.cache_resource(show_spinner=False)
 def _get_supabase_client():
@@ -2353,6 +2359,275 @@ def dp_build_rack_html(title: str, data_list: List[str], rows: int, cols: int) -
     return "".join(blocks)
 
 
+def render_vi_labels(us_df: pd.DataFrame, key_ns: str = "nav") -> None:
+    """Render the Visual Inspection Labels UI for ``us_df``.
+
+    Called from two places: the "Visual Inspection Labels" nav section, and
+    the Donation Processing section immediately after a successful append to
+    the unit status database.  ``key_ns`` namespaces every widget key and the
+    session-state result slot so the two instances never collide.
+
+    The Gist continuation state is deliberately *not* namespaced -- it is
+    keyed on donation prefix, so labels resume from the right ID whichever
+    entry point was used.
+    """
+    _vi_result_key = f"{key_ns}_vi_pdf_result"
+    _subheader("Visual Inspection Labels")
+    st.write(
+        "Groups Quarantine units into batches of N and generates a printable "
+        "PDF.  Each page has two different labels (top and bottom half). "
+        "Rejected and SO units are included in the printed range but do **not** "
+        "count toward the group size."
+    )
+
+    vi_c1, vi_c2, vi_c3 = st.columns([2, 3, 1])
+    with vi_c1:
+        vi_prefix = st.text_input(
+            "Donation prefix", value="F26-", key=f"{key_ns}_vi_prefix", max_chars=20
+        ).strip()
+    with vi_c3:
+        vi_group_size = st.number_input(
+            "Group size", min_value=1, max_value=216, value=12, step=1,
+            key=f"{key_ns}_vi_group_size",
+        )
+
+    # Load Gist state once per session (cached in session_state)
+    if "vi_gist_state" not in st.session_state:
+        st.session_state["vi_gist_state"] = _vi_gist_load()
+    _vi_gist_state = st.session_state["vi_gist_state"]
+    _vi_prefix_state = _vi_gist_state.get(vi_prefix, {})
+    _vi_gist_configured = bool(
+        _vi_prefix_state.get("salt") and _vi_prefix_state.get("last_complete_hash")
+    )
+
+    # Auto-detect start: find the ID after the last printed complete group
+    _vi_auto_start = ""
+    if _vi_gist_configured:
+        _vi_auto_start = _vi_find_next_start(
+            us_df, vi_prefix,
+            _vi_prefix_state["salt"],
+            _vi_prefix_state["last_complete_hash"],
+        ) or ""
+
+    # Compute default start ID: first Quarantine unit from the latest date
+    _vi_default_start = ""
+    try:
+        _vi_dn = us_df.get("Donation #", pd.Series(dtype=str)).fillna("").astype(str).str.strip()
+        _vi_pm = _vi_dn.str.upper().str.startswith(vi_prefix.upper())
+        _vi_qs = us_df.get("Status", pd.Series(dtype=str)).fillna("").astype(str).str.strip().str.lower() == "quarantine"
+        _vi_filt = us_df.loc[_vi_pm & _vi_qs].copy()
+        if "Donation Date" in _vi_filt.columns and not _vi_filt.empty:
+            _vi_filt["_pd"] = _vi_filt["Donation Date"].map(_parse_donation_date)
+            _vi_max_d = _vi_filt["_pd"].dropna().max()
+            if _vi_max_d is not None:
+                _vi_on_max = _vi_filt[_vi_filt["_pd"] == _vi_max_d]
+                def _vi_sort_num(x):
+                    m = re.match(rf"^{re.escape(vi_prefix)}(\d+)$", str(x), re.IGNORECASE)
+                    return int(m.group(1)) if m else int(1e18)
+                _vi_sorted = _vi_on_max.sort_values(
+                    by="Donation #", key=lambda col: col.map(_vi_sort_num)
+                )
+                if not _vi_sorted.empty:
+                    _vi_default_start = str(_vi_sorted.iloc[0]["Donation #"]).strip()
+    except Exception:
+        pass
+
+    # Auto-detected takes priority over date-based default
+    _vi_effective_start = _vi_auto_start or _vi_default_start
+
+    # Show auto-detect info / reset button
+    if _vi_auto_start:
+        _last_updated = _vi_prefix_state.get("last_updated", "unknown date")
+        _info_col, _reset_col = st.columns([5, 1])
+        with _info_col:
+            _show_info(
+                f"Auto-detected start: **{_vi_auto_start}** "
+                f"— last complete group covered donations up to {_last_updated}"
+            )
+        with _reset_col:
+            st.write("")
+            if st.button("Reset", key=f"{key_ns}_vi_reset_state", help="Clear saved state for this prefix"):
+                _vi_gist_state.pop(vi_prefix, None)
+                _vi_gist_save(_vi_gist_state)
+                st.session_state["vi_gist_state"] = _vi_gist_state
+                st.rerun()
+    elif not _vi_gist_configured:
+        _show_caption(
+            "No saved state found for this prefix. "
+            "After generating a PDF the start position will be saved automatically."
+        )
+
+    with vi_c2:
+        vi_start_id = st.text_input(
+            "Start from donation ID",
+            value=_vi_effective_start,
+            key=f"{key_ns}_vi_start_id",
+            placeholder="e.g. F26-012401",
+        ).strip()
+
+    if st.button("Generate Visual Inspection Labels PDF", key=f"{key_ns}_btn_vi_labels"):
+        st.session_state.pop(_vi_result_key, None)
+        if not vi_start_id:
+            _show_error("Please enter a start donation ID.")
+        else:
+            try:
+                vi_groups = build_vi_label_groups(
+                    us_df, vi_prefix, vi_start_id, group_size=int(vi_group_size)
+                )
+                if not vi_groups:
+                    _show_warning("No groups found from the specified start ID.")
+                else:
+                    # End date = last donation date in the file + 1 day
+                    _all_dates = (
+                        us_df.get("Donation Date", pd.Series(dtype=str))
+                        .map(_parse_donation_date)
+                        .dropna()
+                    )
+                    _max_date = _all_dates.max() if not _all_dates.empty else None
+                    _tomorrow = (
+                        _max_date + datetime.timedelta(days=1)
+                        if _max_date
+                        else datetime.date.today()
+                    )
+                    vi_pdf = generate_vi_labels_pdf(vi_groups, tomorrow=_tomorrow)
+
+                    # Save state: hash of last complete group's last ID
+                    _vi_last_complete = next(
+                        (g for g in reversed(vi_groups) if g["is_complete"]), None
+                    )
+                    if _vi_last_complete:
+                        _vi_state = st.session_state.get("vi_gist_state", {})
+                        _vi_ps = _vi_state.get(vi_prefix, {})
+                        _vi_salt = _vi_ps.get("salt") or _secrets_mod.token_hex(16)
+                        _vi_lc_date = _vi_last_complete.get("date_max")
+                        _vi_state[vi_prefix] = {
+                            "salt": _vi_salt,
+                            "last_complete_hash": _vi_hash_id(_vi_salt, _vi_last_complete["last_id"]),
+                            "last_updated": (
+                                _vi_lc_date.strftime("%d.%m.%Y")
+                                if _vi_lc_date
+                                else datetime.date.today().strftime("%d.%m.%Y")
+                            ),
+                        }
+                        _saved_ok = _vi_gist_save(_vi_state)
+                        st.session_state["vi_gist_state"] = _vi_state
+                        if _saved_ok:
+                            _vi_msg = (
+                                f"Generated {len(vi_groups)} label(s). "
+                                f"Next session will auto-start from the continuation point."
+                            )
+                            _vi_msg_kind = "success"
+                        else:
+                            _vi_msg = (
+                                f"Generated {len(vi_groups)} label(s) but could not save state "
+                                f"(check GITHUB_TOKEN and GIST_ID in Streamlit secrets)."
+                            )
+                            _vi_msg_kind = "warning"
+                    else:
+                        _vi_msg = f"Generated {len(vi_groups)} label(s)."
+                        _vi_msg_kind = "success"
+                    # Preview table
+                    _prev = []
+                    for _g in vi_groups:
+                        _dm, _dx = _g["date_min"], _g["date_max"]
+                        if _g["is_complete"]:
+                            _dr = (
+                                f"{_dm.strftime('%d.%m.%Y')} – {_dx.strftime('%d.%m.%Y')}"
+                                if _dm and _dx else "—"
+                            )
+                            _ir = f"{_g['first_id']} – {_g['last_id']}"
+                        else:
+                            _dr = (
+                                f"{_dx.strftime('%d.%m.%Y')} – {_tomorrow.strftime('%d.%m.%Y')}"
+                                if _dx else f"? – {_tomorrow.strftime('%d.%m.%Y')}"
+                            )
+                            _ir = f"{_g['first_id']} –"
+                        _prev.append({
+                            "Date range": _dr,
+                            "ID range": _ir,
+                            "Quarantine": _g["valid_count"],
+                            "Total rows": len(_g["rows"]),
+                            "Complete": "✓" if _g["is_complete"] else "(partial)",
+                        })
+                    # Keep result in session state so the Download / Print
+                    # buttons and preview survive Streamlit reruns
+                    st.session_state[_vi_result_key] = {
+                        "pdf": vi_pdf,
+                        "n_groups": len(vi_groups),
+                        "msg": _vi_msg,
+                        "msg_kind": _vi_msg_kind,
+                        "preview": _prev,
+                    }
+            except ImportError as _e:
+                _show_error(str(_e))
+            except ValueError as _e:
+                _show_error(str(_e))
+            except Exception as _e:
+                st.exception(_e)
+
+    _vi_res = st.session_state.get(_vi_result_key)
+    if _vi_res:
+        if _vi_res["msg_kind"] == "warning":
+            _show_warning(_vi_res["msg"])
+        else:
+            _show_success(_vi_res["msg"])
+        _dl_col, _pr_col = st.columns([1, 1])
+        with _dl_col:
+            st.download_button(
+                label=f"⬇ Download PDF ({_vi_res['n_groups']} label pages)",
+                data=_vi_res["pdf"],
+                file_name="vi_labels.pdf",
+                mime="application/pdf",
+                key=f"{key_ns}_vi_pdf_dl",
+            )
+        with _pr_col:
+            _vi_b64 = base64.b64encode(_vi_res["pdf"]).decode()
+            _vi_print_html = """
+<button onclick="printVI()" style="
+  background:#1e6fbf;color:#fff;border:none;padding:0.45rem 1rem;
+  border-radius:0.375rem;cursor:pointer;font-size:0.875rem;
+  font-family:sans-serif;width:100%;margin-top:4px;">
+  &#128438;&nbsp;Print PDF
+</button>
+<script>
+var _viUrl=null;
+function _viBlobUrl(){
+  if(_viUrl)return _viUrl;
+  var bin=atob("__VI_B64__");
+  var arr=new Uint8Array(bin.length);
+  for(var i=0;i<bin.length;i++)arr[i]=bin.charCodeAt(i);
+  _viUrl=URL.createObjectURL(new Blob([arr],{type:"application/pdf"}));
+  return _viUrl;
+}
+function printVI(){
+  var url=_viBlobUrl();
+  // Firefox cannot print a PDF from a hidden iframe - open a tab instead
+  if(navigator.userAgent.toLowerCase().indexOf("firefox")>-1){
+    window.open(url,"_blank");
+    return;
+  }
+  var old=document.getElementById("__VI_FRAME__");
+  if(old)old.parentNode.removeChild(old);
+  var f=document.createElement("iframe");
+  f.id="__VI_FRAME__";
+  f.style.cssText="position:fixed;right:0;bottom:0;width:0;height:0;border:0;";
+  f.onload=function(){
+    setTimeout(function(){
+      try{f.contentWindow.focus();f.contentWindow.print();}
+      catch(e){window.open(url,"_blank");}
+    },200);
+  };
+  f.src=url;
+  document.body.appendChild(f);
+}
+</script>
+""".replace("__VI_B64__", _vi_b64).replace(
+                "__VI_FRAME__", f"vi-print-frame-{key_ns}"
+            )
+            st.components.v1.html(_vi_print_html, height=48)
+        st.table(pd.DataFrame(_vi_res["preview"]))
+
+
 def main() -> None:
     """Run the Streamlit application.
 
@@ -3069,258 +3344,7 @@ header { visibility: visible; }
                 _show_rack_fullscreen_dialog()
 
     if nav_section == "Visual Inspection Labels" and us_df is not None:
-        _subheader("Visual Inspection Labels")
-        st.write(
-            "Groups Quarantine units into batches of N and generates a printable "
-            "PDF.  Each page has two different labels (top and bottom half). "
-            "Rejected and SO units are included in the printed range but do **not** "
-            "count toward the group size."
-        )
-
-        vi_c1, vi_c2, vi_c3 = st.columns([2, 3, 1])
-        with vi_c1:
-            vi_prefix = st.text_input(
-                "Donation prefix", value="F26-", key="vi_prefix", max_chars=20
-            ).strip()
-        with vi_c3:
-            vi_group_size = st.number_input(
-                "Group size", min_value=1, max_value=216, value=12, step=1,
-                key="vi_group_size",
-            )
-
-        # Load Gist state once per session (cached in session_state)
-        if "vi_gist_state" not in st.session_state:
-            st.session_state["vi_gist_state"] = _vi_gist_load()
-        _vi_gist_state = st.session_state["vi_gist_state"]
-        _vi_prefix_state = _vi_gist_state.get(vi_prefix, {})
-        _vi_gist_configured = bool(
-            _vi_prefix_state.get("salt") and _vi_prefix_state.get("last_complete_hash")
-        )
-
-        # Auto-detect start: find the ID after the last printed complete group
-        _vi_auto_start = ""
-        if _vi_gist_configured:
-            _vi_auto_start = _vi_find_next_start(
-                us_df, vi_prefix,
-                _vi_prefix_state["salt"],
-                _vi_prefix_state["last_complete_hash"],
-            ) or ""
-
-        # Compute default start ID: first Quarantine unit from the latest date
-        _vi_default_start = ""
-        try:
-            _vi_dn = us_df.get("Donation #", pd.Series(dtype=str)).fillna("").astype(str).str.strip()
-            _vi_pm = _vi_dn.str.upper().str.startswith(vi_prefix.upper())
-            _vi_qs = us_df.get("Status", pd.Series(dtype=str)).fillna("").astype(str).str.strip().str.lower() == "quarantine"
-            _vi_filt = us_df.loc[_vi_pm & _vi_qs].copy()
-            if "Donation Date" in _vi_filt.columns and not _vi_filt.empty:
-                _vi_filt["_pd"] = _vi_filt["Donation Date"].map(_parse_donation_date)
-                _vi_max_d = _vi_filt["_pd"].dropna().max()
-                if _vi_max_d is not None:
-                    _vi_on_max = _vi_filt[_vi_filt["_pd"] == _vi_max_d]
-                    def _vi_sort_num(x):
-                        m = re.match(rf"^{re.escape(vi_prefix)}(\d+)$", str(x), re.IGNORECASE)
-                        return int(m.group(1)) if m else int(1e18)
-                    _vi_sorted = _vi_on_max.sort_values(
-                        by="Donation #", key=lambda col: col.map(_vi_sort_num)
-                    )
-                    if not _vi_sorted.empty:
-                        _vi_default_start = str(_vi_sorted.iloc[0]["Donation #"]).strip()
-        except Exception:
-            pass
-
-        # Auto-detected takes priority over date-based default
-        _vi_effective_start = _vi_auto_start or _vi_default_start
-
-        # Show auto-detect info / reset button
-        if _vi_auto_start:
-            _last_updated = _vi_prefix_state.get("last_updated", "unknown date")
-            _info_col, _reset_col = st.columns([5, 1])
-            with _info_col:
-                _show_info(
-                    f"Auto-detected start: **{_vi_auto_start}** "
-                    f"— last complete group covered donations up to {_last_updated}"
-                )
-            with _reset_col:
-                st.write("")
-                if st.button("Reset", key="vi_reset_state", help="Clear saved state for this prefix"):
-                    _vi_gist_state.pop(vi_prefix, None)
-                    _vi_gist_save(_vi_gist_state)
-                    st.session_state["vi_gist_state"] = _vi_gist_state
-                    st.rerun()
-        elif not _vi_gist_configured:
-            _show_caption(
-                "No saved state found for this prefix. "
-                "After generating a PDF the start position will be saved automatically."
-            )
-
-        with vi_c2:
-            vi_start_id = st.text_input(
-                "Start from donation ID",
-                value=_vi_effective_start,
-                key="vi_start_id",
-                placeholder="e.g. F26-012401",
-            ).strip()
-
-        if st.button("Generate Visual Inspection Labels PDF", key="btn_vi_labels"):
-            st.session_state.pop("vi_pdf_result", None)
-            if not vi_start_id:
-                _show_error("Please enter a start donation ID.")
-            else:
-                try:
-                    vi_groups = build_vi_label_groups(
-                        us_df, vi_prefix, vi_start_id, group_size=int(vi_group_size)
-                    )
-                    if not vi_groups:
-                        _show_warning("No groups found from the specified start ID.")
-                    else:
-                        # End date = last donation date in the file + 1 day
-                        _all_dates = (
-                            us_df.get("Donation Date", pd.Series(dtype=str))
-                            .map(_parse_donation_date)
-                            .dropna()
-                        )
-                        _max_date = _all_dates.max() if not _all_dates.empty else None
-                        _tomorrow = (
-                            _max_date + datetime.timedelta(days=1)
-                            if _max_date
-                            else datetime.date.today()
-                        )
-                        vi_pdf = generate_vi_labels_pdf(vi_groups, tomorrow=_tomorrow)
-
-                        # Save state: hash of last complete group's last ID
-                        _vi_last_complete = next(
-                            (g for g in reversed(vi_groups) if g["is_complete"]), None
-                        )
-                        if _vi_last_complete:
-                            _vi_state = st.session_state.get("vi_gist_state", {})
-                            _vi_ps = _vi_state.get(vi_prefix, {})
-                            _vi_salt = _vi_ps.get("salt") or _secrets_mod.token_hex(16)
-                            _vi_lc_date = _vi_last_complete.get("date_max")
-                            _vi_state[vi_prefix] = {
-                                "salt": _vi_salt,
-                                "last_complete_hash": _vi_hash_id(_vi_salt, _vi_last_complete["last_id"]),
-                                "last_updated": (
-                                    _vi_lc_date.strftime("%d.%m.%Y")
-                                    if _vi_lc_date
-                                    else datetime.date.today().strftime("%d.%m.%Y")
-                                ),
-                            }
-                            _saved_ok = _vi_gist_save(_vi_state)
-                            st.session_state["vi_gist_state"] = _vi_state
-                            if _saved_ok:
-                                _vi_msg = (
-                                    f"Generated {len(vi_groups)} label(s). "
-                                    f"Next session will auto-start from the continuation point."
-                                )
-                                _vi_msg_kind = "success"
-                            else:
-                                _vi_msg = (
-                                    f"Generated {len(vi_groups)} label(s) but could not save state "
-                                    f"(check GITHUB_TOKEN and GIST_ID in Streamlit secrets)."
-                                )
-                                _vi_msg_kind = "warning"
-                        else:
-                            _vi_msg = f"Generated {len(vi_groups)} label(s)."
-                            _vi_msg_kind = "success"
-                        # Preview table
-                        _prev = []
-                        for _g in vi_groups:
-                            _dm, _dx = _g["date_min"], _g["date_max"]
-                            if _g["is_complete"]:
-                                _dr = (
-                                    f"{_dm.strftime('%d.%m.%Y')} – {_dx.strftime('%d.%m.%Y')}"
-                                    if _dm and _dx else "—"
-                                )
-                                _ir = f"{_g['first_id']} – {_g['last_id']}"
-                            else:
-                                _dr = (
-                                    f"{_dx.strftime('%d.%m.%Y')} – {_tomorrow.strftime('%d.%m.%Y')}"
-                                    if _dx else f"? – {_tomorrow.strftime('%d.%m.%Y')}"
-                                )
-                                _ir = f"{_g['first_id']} –"
-                            _prev.append({
-                                "Date range": _dr,
-                                "ID range": _ir,
-                                "Quarantine": _g["valid_count"],
-                                "Total rows": len(_g["rows"]),
-                                "Complete": "✓" if _g["is_complete"] else "(partial)",
-                            })
-                        # Keep result in session state so the Download / Print
-                        # buttons and preview survive Streamlit reruns
-                        st.session_state["vi_pdf_result"] = {
-                            "pdf": vi_pdf,
-                            "n_groups": len(vi_groups),
-                            "msg": _vi_msg,
-                            "msg_kind": _vi_msg_kind,
-                            "preview": _prev,
-                        }
-                except ImportError as _e:
-                    _show_error(str(_e))
-                except ValueError as _e:
-                    _show_error(str(_e))
-                except Exception as _e:
-                    st.exception(_e)
-
-        _vi_res = st.session_state.get("vi_pdf_result")
-        if _vi_res:
-            if _vi_res["msg_kind"] == "warning":
-                _show_warning(_vi_res["msg"])
-            else:
-                _show_success(_vi_res["msg"])
-            _dl_col, _pr_col = st.columns([1, 1])
-            with _dl_col:
-                st.download_button(
-                    label=f"⬇ Download PDF ({_vi_res['n_groups']} label pages)",
-                    data=_vi_res["pdf"],
-                    file_name="vi_labels.pdf",
-                    mime="application/pdf",
-                    key="vi_pdf_dl",
-                )
-            with _pr_col:
-                _vi_b64 = base64.b64encode(_vi_res["pdf"]).decode()
-                _vi_print_html = """
-<button onclick="printVI()" style="
-  background:#1e6fbf;color:#fff;border:none;padding:0.45rem 1rem;
-  border-radius:0.375rem;cursor:pointer;font-size:0.875rem;
-  font-family:sans-serif;width:100%;margin-top:4px;">
-  &#128438;&nbsp;Print PDF
-</button>
-<script>
-var _viUrl=null;
-function _viBlobUrl(){
-  if(_viUrl)return _viUrl;
-  var bin=atob("__VI_B64__");
-  var arr=new Uint8Array(bin.length);
-  for(var i=0;i<bin.length;i++)arr[i]=bin.charCodeAt(i);
-  _viUrl=URL.createObjectURL(new Blob([arr],{type:"application/pdf"}));
-  return _viUrl;
-}
-function printVI(){
-  var url=_viBlobUrl();
-  // Firefox cannot print a PDF from a hidden iframe - open a tab instead
-  if(navigator.userAgent.toLowerCase().indexOf("firefox")>-1){
-    window.open(url,"_blank");
-    return;
-  }
-  var old=document.getElementById("vi-print-frame");
-  if(old)old.parentNode.removeChild(old);
-  var f=document.createElement("iframe");
-  f.id="vi-print-frame";
-  f.style.cssText="position:fixed;right:0;bottom:0;width:0;height:0;border:0;";
-  f.onload=function(){
-    setTimeout(function(){
-      try{f.contentWindow.focus();f.contentWindow.print();}
-      catch(e){window.open(url,"_blank");}
-    },200);
-  };
-  f.src=url;
-  document.body.appendChild(f);
-}
-</script>
-""".replace("__VI_B64__", _vi_b64)
-                st.components.v1.html(_vi_print_html, height=48)
-            st.table(pd.DataFrame(_vi_res["preview"]))
+        render_vi_labels(us_df, key_ns="nav")
 
     if nav_section == "QC Report PDF Extractor":
         _subheader("QC Report PDF Extractor")
@@ -4796,6 +4820,289 @@ function printVI(){
 
             _subheader("Compensation Details")
             st.code(_dp_res["comp_text"], language=None)
+
+            # ----------------------------------------------------------------
+            # Commit the generated unit status rows to the CSV database, then
+            # print Visual Inspection labels from the updated data.
+            #
+            # Deliberately placed *below* the freeze-tracker and compensation
+            # output so every validation result is on screen before anyone
+            # writes to the record.
+            # ----------------------------------------------------------------
+            _subheader("Commit to Unit Status Database")
+
+            _dp_records = usdb.parse_dp_rows(_dp_res["excel_rows"])
+            _dp_sig = hashlib.sha256(
+                "\n".join(_dp_res["excel_rows"]).encode("utf-8")
+            ).hexdigest()[:16]
+            _dp_committed = st.session_state.get("dp_us_commit")
+
+            # --- already committed this exact batch: show result + VI labels --
+            if _dp_committed and _dp_committed.get("sig") == _dp_sig:
+                _show_success(
+                    f"Appended **{_dp_committed['rows']} row(s)** to "
+                    f"**{_dp_committed['file']}** "
+                    f"({_dp_committed['dates']})."
+                )
+                if _dp_committed.get("archive"):
+                    _show_caption(
+                        f"Snapshot before write: `{_dp_committed['archive']}`"
+                    )
+                else:
+                    _show_warning(
+                        "The pre-write snapshot could not be saved, so this "
+                        "append is not reversible from storage."
+                    )
+                if st.button(
+                    "Undo lock / commit a different batch",
+                    key="dp_us_commit_reset",
+                    help="Clears the committed flag for this screen only. It "
+                         "does not roll back the database.",
+                ):
+                    st.session_state.pop("dp_us_commit", None)
+                    st.rerun()
+
+                st.markdown("---")
+                if us_df is not None:
+                    render_vi_labels(us_df, key_ns="dp")
+                else:
+                    _show_warning(
+                        "Unit status data is not loaded in this session, so "
+                        "labels cannot be generated. Select the database file "
+                        "in the sidebar."
+                    )
+
+            # --- not yet committed: run the checks -------------------------
+            elif not _dp_records:
+                _show_warning("No rows to commit.")
+            elif _sb_client is None:
+                _show_error(
+                    "Storage is not connected, so the unit status database "
+                    "cannot be updated. "
+                    + (_sb_error or "Check SUPABASE_URL / SUPABASE_KEY.")
+                )
+            else:
+                _dp_batch_dates = sorted(
+                    {
+                        d
+                        for d in (
+                            _parse_donation_date(r["date"]) for r in _dp_records
+                        )
+                        if d is not None
+                    }
+                )
+                if not _dp_batch_dates:
+                    _show_error(
+                        "None of the generated rows carry a readable donation "
+                        "date, so the target year cannot be determined."
+                    )
+                else:
+                    _dp_year = _dp_batch_dates[-1].year
+                    _dp_names = _sb_list_files(_sb_client, _US_FOLDER)
+                    _dp_pick = usdb.select_db_file(_dp_names, _dp_year)
+
+                    # One file per year is the rule; anything else is a cleanup
+                    # task for the user, not something to guess at.
+                    for _yr, _files in sorted(_dp_pick.duplicates.items()):
+                        _show_error(
+                            f"{len(_files)} files found for {_yr} — there must "
+                            f"be exactly one. Delete the extras in Storage "
+                            f"Manager: {', '.join(_files)}"
+                        )
+                    if _dp_pick.non_conforming:
+                        _show_warning(
+                            "Ignoring file(s) that do not follow the "
+                            "`Unit Status(UNIT STATUS <year>) ....csv` naming "
+                            f"convention: {', '.join(_dp_pick.non_conforming)}"
+                        )
+
+                    _dp_target = _dp_pick.chosen
+                    if _dp_target is None and _dp_year not in _dp_pick.duplicates:
+                        _show_error(
+                            f"No unit status file for {_dp_year} in "
+                            f"`{_US_FOLDER}/`. Upload one named "
+                            f"`Unit Status(UNIT STATUS {_dp_year}) ....csv` "
+                            f"first."
+                        )
+
+                    if _dp_target:
+                        _dp_raw = _sb_download(
+                            _sb_client, f"{_US_FOLDER}/{_dp_target}"
+                        )
+                        if _dp_raw is None:
+                            _show_error(f"Could not download {_dp_target}.")
+                        else:
+                            try:
+                                _dp_shape = usdb.read_csv_shape(_dp_raw)
+                            except ValueError as _e:
+                                _dp_shape = None
+                                _show_error(str(_e))
+
+                            if _dp_shape is not None:
+                                _show_caption(
+                                    f"Target: **{_dp_target}** · "
+                                    f"{len(_dp_shape.header)} columns"
+                                )
+
+                                # ---- column mapping (auto, with override) ----
+                                _dp_map = usdb.resolve_headers(_dp_shape.header)
+                                _dp_unres = usdb.unresolved_fields(_dp_map)
+                                if _dp_unres:
+                                    _show_warning(
+                                        "Could not match "
+                                        f"{len(_dp_unres)} field(s) to a column "
+                                        "automatically — pick them below."
+                                    )
+                                with st.expander(
+                                    "Column mapping"
+                                    + (" — action needed" if _dp_unres else ""),
+                                    expanded=bool(_dp_unres),
+                                ):
+                                    _dp_opts = ["— not written —"] + list(
+                                        _dp_shape.header
+                                    )
+                                    for _f in usdb.FIELDS:
+                                        _auto = _dp_map.get(_f)
+                                        _idx = (
+                                            _dp_opts.index(_auto)
+                                            if _auto in _dp_opts
+                                            else 0
+                                        )
+                                        _sel = st.selectbox(
+                                            usdb.FIELD_LABELS[_f],
+                                            _dp_opts,
+                                            index=_idx,
+                                            key=f"dp_map_{_f}_{_dp_target}",
+                                        )
+                                        _dp_map[_f] = (
+                                            None
+                                            if _sel == "— not written —"
+                                            else _sel
+                                        )
+
+                                if not _dp_map.get("donation_num") or not _dp_map.get("date"):
+                                    _show_error(
+                                        "Donation # and Donation Date must both "
+                                        "be mapped before committing."
+                                    )
+                                else:
+                                    _dp_index = usdb.build_existing_index(
+                                        _dp_shape, _dp_map, _parse_donation_date
+                                    )
+                                    _dp_pf = usdb.preflight(
+                                        _dp_records,
+                                        _dp_index["ids"],
+                                        _dp_index["dates"],
+                                        _dp_year,
+                                        _parse_donation_date,
+                                    )
+
+                                    _dp_m1, _dp_m2, _dp_m3 = st.columns(3)
+                                    _dp_m1.metric(
+                                        "Rows to append", len(_dp_records)
+                                    )
+                                    _dp_m2.metric(
+                                        "Rows in database", _dp_index["rows"]
+                                    )
+                                    _dp_m3.metric(
+                                        "Latest date on file",
+                                        _dp_pf.latest_existing.strftime("%d.%m.%Y")
+                                        if _dp_pf.latest_existing
+                                        else "—",
+                                    )
+
+                                    for _b in _dp_pf.blockers:
+                                        _show_error(_b)
+                                    for _w in _dp_pf.warnings:
+                                        _show_warning(_w)
+
+                                    _dp_ack = True
+                                    if _dp_pf.requires_gap_ack:
+                                        _dp_ack = st.checkbox(
+                                            "I confirm there were no donations "
+                                            "on the missing date(s) above "
+                                            "(centre closed / no collection).",
+                                            key=f"dp_gap_ack_{_dp_sig}",
+                                        )
+
+                                    if st.session_state.get("unit_status") is not None:
+                                        _show_warning(
+                                            "A locally uploaded unit status file "
+                                            "is active in the sidebar and will "
+                                            "take priority over the database "
+                                            "after the append. Clear the "
+                                            "uploader to see the updated data."
+                                        )
+
+                                    if st.button(
+                                        f"Append {len(_dp_records)} row(s) to {_dp_target}",
+                                        key=f"dp_us_commit_btn_{_dp_sig}",
+                                        disabled=not (_dp_pf.ok and _dp_ack),
+                                        type="primary",
+                                    ):
+                                        # 1. snapshot before the destructive upsert
+                                        _dp_arch = usdb.archive_path(
+                                            _US_FOLDER, _dp_target
+                                        )
+                                        _dp_arch_ok = (
+                                            _sb_upload(
+                                                _sb_client, _dp_arch, _dp_raw
+                                            )
+                                            is True
+                                        )
+                                        # 2. append and write back
+                                        try:
+                                            _dp_new = usdb.append_records(
+                                                _dp_raw, _dp_records, _dp_map
+                                            )
+                                        except Exception as _e:
+                                            _dp_new = None
+                                            st.exception(_e)
+
+                                        if _dp_new is not None:
+                                            _dp_up = _sb_upload(
+                                                _sb_client,
+                                                f"{_US_FOLDER}/{_dp_target}",
+                                                _dp_new,
+                                                mime="text/csv",
+                                            )
+                                            if _dp_up is True:
+                                                # 3. make the whole app see the
+                                                #    updated database at once
+                                                st.session_state["_sb_ls_unit_status"] = (
+                                                    _sb_list_files(
+                                                        _sb_client, _US_FOLDER
+                                                    )
+                                                )
+                                                st.session_state["_sb_ln_unit_status"] = _dp_target
+                                                st.session_state["_sb_ld_unit_status"] = _dp_new
+                                                st.session_state["unit_status_sb_pick"] = _dp_target
+                                                st.session_state["dp_us_commit"] = {
+                                                    "sig": _dp_sig,
+                                                    "file": _dp_target,
+                                                    "rows": len(_dp_records),
+                                                    "archive": _dp_arch
+                                                    if _dp_arch_ok
+                                                    else "",
+                                                    "dates": " – ".join(
+                                                        d.strftime("%d.%m.%Y")
+                                                        for d in (
+                                                            _dp_batch_dates[0],
+                                                            _dp_batch_dates[-1],
+                                                        )
+                                                    )
+                                                    if len(_dp_batch_dates) > 1
+                                                    else _dp_batch_dates[0].strftime(
+                                                        "%d.%m.%Y"
+                                                    ),
+                                                }
+                                                st.rerun()
+                                            else:
+                                                _show_error(
+                                                    f"Upload failed: {_dp_up}. "
+                                                    f"The database was not "
+                                                    f"changed."
+                                                )
 
         _subheader("Rack Visualizations")
         st.markdown(_DP_RACK_CSS, unsafe_allow_html=True)

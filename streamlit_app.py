@@ -5025,13 +5025,32 @@ header { visibility: visible; }
                                             key=f"dp_gap_ack_{_dp_sig}",
                                         )
 
+                                    # The sidebar drives us_df, which the label
+                                    # step below reads.  Anything overriding the
+                                    # commit target there would build labels from
+                                    # the wrong data, so say so up front.
+                                    _dp_side = st.session_state.get(
+                                        "unit_status_sb_pick"
+                                    )
                                     if st.session_state.get("unit_status") is not None:
                                         _show_warning(
                                             "A locally uploaded unit status file "
-                                            "is active in the sidebar and will "
-                                            "take priority over the database "
-                                            "after the append. Clear the "
-                                            "uploader to see the updated data."
+                                            "is active in the sidebar and takes "
+                                            "priority over storage. Clear the "
+                                            "uploader so the labels are built "
+                                            "from the updated database."
+                                        )
+                                    elif (
+                                        _dp_side
+                                        and _dp_side != _dp_target
+                                        and _dp_side in _dp_names
+                                    ):
+                                        _show_warning(
+                                            f"The sidebar is loading "
+                                            f"**{_dp_side}**, not the commit "
+                                            f"target **{_dp_target}**. Switch it "
+                                            f"after committing so the labels use "
+                                            f"the updated database."
                                         )
 
                                     if st.button(
@@ -5076,7 +5095,6 @@ header { visibility: visible; }
                                                 )
                                                 st.session_state["_sb_ln_unit_status"] = _dp_target
                                                 st.session_state["_sb_ld_unit_status"] = _dp_new
-                                                st.session_state["unit_status_sb_pick"] = _dp_target
                                                 st.session_state["dp_us_commit"] = {
                                                     "sig": _dp_sig,
                                                     "file": _dp_target,

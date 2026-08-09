@@ -1,11 +1,17 @@
 """Donation Processing dashboard section."""
 
+import datetime
 import hashlib
 
 import pandas as pd
 import streamlit as st
 
 from app.features.donation_processing import unit_status_db as usdb
+from app.features.donation_processing.inventory import (
+    STATUS_LOW,
+    STATUS_MISSING,
+    match_lots,
+)
 from app.features.donation_processing.logic import (
     dp_parse_barcodes,
     dp_process_pc_blut,
@@ -109,11 +115,30 @@ def render(us_df, sb_client, sb_error: str) -> None:
             if _dp_res["excel_rows"]:
                 st.code("\n".join(_dp_res["excel_rows"]), language=None)
             else:
+                _dp_stats = _dp_res["row_stats"]
                 _show_warning(
                     "No PC-Blut rows parsed. Check that the correct Role is "
                     "selected — Supervisor and Staff exports have different "
                     "column layouts."
                 )
+                if _dp_stats["rows_too_short"]:
+                    _show_caption(
+                        f"{_dp_stats['rows_too_short']} of "
+                        f"{_dp_stats['rows_seen']} row(s) were too narrow: "
+                        f"this role needs at least "
+                        f"{_dp_stats['min_cols_required']} columns but the "
+                        f"widest row has {_dp_stats['widest_row']}."
+                    )
+            st.markdown("**Rejected Units List** (tab-separated)")
+            _show_caption(
+                "Donation # · Donation date · Reason · WBS or Full Collection "
+                "· User · Volume"
+            )
+            if _dp_res["rejected_rows"]:
+                st.code("\n".join(_dp_res["rejected_rows"]), language=None)
+            else:
+                _show_caption("No rejected units in this batch.")
+
         with _dp_o2:
             st.markdown("**Missing from PC-Blut**")
             if _dp_res["missing"]:
@@ -481,3 +506,84 @@ def render(us_df, sb_client, sb_error: str) -> None:
             dp_build_rack_html("AbSc", _dp_absc, 6, 6),
             unsafe_allow_html=True,
         )
+
+    _render_warehouse_balances()
+
+
+def _render_warehouse_balances() -> None:
+    """Cross-reference the current lots against the inventory stock list."""
+    _subheader("Current Status Of Warehouse Balances")
+
+    _inv_c1, _inv_c2 = st.columns(2)
+    with _inv_c1:
+        _inv_lots = st.text_area(
+            "Current Lot List (one per line, pipe-separated)",
+            key="dp_inv_lots",
+            height=150,
+            placeholder="FA25J28133 | ...",
+        )
+    with _inv_c2:
+        _inv_stock = st.text_area(
+            "Inventory Stock List (pipe-separated rows)",
+            key="dp_inv_stock",
+            height=150,
+            placeholder="BD | Antiseptic | 5274014 | ...",
+        )
+
+    _inv_min = st.number_input(
+        "Min quantity threshold",
+        min_value=0,
+        value=150,
+        step=10,
+        key="dp_inv_min",
+        help="A lot at or below this quantity is flagged as low.",
+    )
+
+    if not _inv_lots.strip() or not _inv_stock.strip():
+        _show_info(
+            "Paste both the current lot list and the inventory stock list to "
+            "check quantities."
+        )
+        return
+
+    _inv_rows = match_lots(_inv_lots, _inv_stock, float(_inv_min))
+    if not _inv_rows:
+        _show_warning("No valid lots found in the current lot list.")
+        return
+
+    _inv_df = pd.DataFrame(
+        [
+            {
+                "Item Name": r.item,
+                "Lot Number": r.lot,
+                "Quantity / Status": r.quantity,
+                "Flag": {
+                    STATUS_LOW: "Low — change expected",
+                    STATUS_MISSING: "Not found in stock",
+                }.get(r.status, ""),
+            }
+            for r in _inv_rows
+        ]
+    )
+    st.dataframe(_inv_df, hide_index=True, use_container_width=True)
+
+    _inv_problems = [r for r in _inv_rows if r.is_problem]
+    if _inv_problems:
+        _show_warning(
+            f"{len(_inv_problems)} of {len(_inv_rows)} lot(s) need attention."
+        )
+    else:
+        _show_success(f"All {len(_inv_rows)} lot(s) are above the threshold.")
+
+    # The browser tool prints this table; Streamlit offers it as a file the
+    # user can print or archive instead.
+    st.download_button(
+        "Download warehouse balances (CSV)",
+        data=_inv_df.to_csv(index=False).encode("utf-8"),
+        file_name=(
+            f"warehouse_balances_"
+            f"{datetime.date.today().strftime('%Y%m%d')}.csv"
+        ),
+        mime="text/csv",
+        key="dp_inv_csv",
+    )

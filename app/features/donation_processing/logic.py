@@ -8,17 +8,27 @@ from typing import Dict, List, Optional, Set
 
 _DP_BARCODE_RE = re.compile(r"^=C0703(\d{2})(\d{6})00$")
 
-# PC-Blut pipe-separated column indices per role
+# PC-Blut pipe-separated column indices per role.
+#
+# ``reject_reason_detailed`` deliberately points at the same column as
+# ``quarantine``: the detailed variant keeps the ``*`` markers that
+# ``quarantine`` strips.  A row is only processed when it has more columns
+# than the highest index here, so ``user`` also sets the minimum row width.
 _DP_COLS: Dict[str, Dict[str, int]] = {
     "supervisor": {
         "product": 39, "donation_num": 47, "donor_id": 38, "raw_date": 48,
         "start5": 76, "quarantine": 42, "prod_vol": 50, "vol": 51,
+        "reject_reason_detailed": 42, "user": 85,
     },
     "staff": {
         "product": 9, "donation_num": 17, "donor_id": 8, "raw_date": 18,
         "start5": 46, "quarantine": 12, "prod_vol": 20, "vol": 21,
+        "reject_reason_detailed": 12, "user": 55,
     },
 }
+
+#: Volume shortfall (mL) at or above which a unit counts as incomplete / WBS.
+_DP_INCOMPLETE_ML = 6
 
 
 def dp_parse_barcodes(raw_text: str) -> List[str]:
@@ -54,6 +64,19 @@ def _dp_parse_float(s: str) -> float:
     """Mimic JS ``parseFloat``: leading numeric prefix or NaN."""
     m = re.match(r"^[+-]?(\d+\.?\d*|\.\d+)", s.strip())
     return float(m.group(0)) if m else float("nan")
+
+
+def _dp_fmt_number(value: float) -> str:
+    """Render a number the way the browser tool does — no trailing ``.0``.
+
+    Volumes reach the rejected-units report as plain integers (``849``), so a
+    Python float must not print as ``849.0``.
+    """
+    if math.isnan(value):
+        return "NaN"
+    if value == int(value):
+        return str(int(value))
+    return str(value)
 
 
 def dp_parse_time(raw: str) -> Optional[int]:
@@ -230,27 +253,37 @@ def dp_process_pc_blut(
 ) -> Dict:
     """Process pasted PC-Blut rows against the scanned barcode lists.
 
-    Returns a dict with ``excel_rows`` (tab-separated), ``start5_values``,
-    ``missing`` (VMT-NAT IDs absent from PC-Blut), ``comp_text``,
-    ``rejected_units`` and ``incomplete_units``.
+    Returns a dict with ``excel_rows`` (tab-separated), ``rejected_rows``
+    (tab-separated rejected-unit report), ``start5_values``, ``missing``
+    (VMT-NAT IDs absent from PC-Blut), ``comp_text``, ``rejected_units`` and
+    ``incomplete_units``.
     """
     cols = _DP_COLS[role]
     min_cols = max(cols.values()) + 1
     vmt_set, ser_set, absc_set = set(vmt_list), set(ser_list), set(absc_list)
 
     excel_rows: List[str] = []
+    rejected_rows: List[str] = []
     start5_values: List[str] = []
     processed: Set[str] = set()
     comp_date = ""
     rejected_units: List[str] = []
     incomplete_units: List[str] = []
+    # Tracked purely so the UI can explain an empty result: a row narrower
+    # than min_cols is dropped, which otherwise looks like "nothing happened".
+    rows_seen = 0
+    rows_too_short = 0
+    widest_row = 0
 
     for line in pc_blut_raw.splitlines():
         line = line.strip()
         if not line:
             continue
         columns = line.split("|")
+        rows_seen += 1
+        widest_row = max(widest_row, len(columns))
         if len(columns) < min_cols:
+            rows_too_short += 1
             continue
 
         donor_id = columns[cols["donor_id"]].strip()
@@ -261,6 +294,8 @@ def dp_process_pc_blut(
         prod_vol = _dp_parse_float(columns[cols["prod_vol"]])
         vol = _dp_parse_float(columns[cols["vol"]])
         start5_value = columns[cols["start5"]].strip()
+        detailed_reason = columns[cols["reject_reason_detailed"]].strip()
+        user_name = columns[cols["user"]].strip()
 
         if product == "No bleed":
             continue
@@ -279,13 +314,19 @@ def dp_process_pc_blut(
             not is_rejected
             and not math.isnan(prod_vol)
             and not math.isnan(vol)
-            and prod_vol - vol >= 5
+            and prod_vol - vol >= _DP_INCOMPLETE_ML
         ):
             incomplete_units.append(f"{donation_num}/ {donor_id}")
 
         in_vmt = donation_num in vmt_set
         in_ser = donation_num in ser_set
         in_absc = donation_num in absc_set
+
+        # A rejected unit whose samples were still collected must say so: the
+        # unit status cleaner downstream looks for this exact phrase.
+        final_reason = clean_reason
+        if in_vmt and is_rejected:
+            final_reason += " **Sample collected**"
 
         if product == "Test sample":
             donor_status = "SO (16 week)"
@@ -310,8 +351,21 @@ def dp_process_pc_blut(
         iso_week = dp_iso_week(raw_date)
         excel_rows.append(
             f"{donation_num}\t{donor_id}\t{donor_status}\t{formatted_date}\t"
-            f"{iso_week}\t{status}\t{clean_reason}"
+            f"{iso_week}\t{status}\t{final_reason}"
         )
+
+        if status == "Rejected":
+            diff = prod_vol - vol
+            wbs_status = (
+                "WBS"
+                if not math.isnan(diff) and diff >= _DP_INCOMPLETE_ML
+                else "Full Collection"
+            )
+            rejected_rows.append(
+                f"{donation_num}\t{raw_date}\t{detailed_reason}\t{wbs_status}\t"
+                f"{user_name}\t{'0' if math.isnan(vol) else _dp_fmt_number(vol)}"
+            )
+
         start5_values.append(start5_value)
 
     comp_text = (
@@ -326,9 +380,16 @@ def dp_process_pc_blut(
 
     return {
         "excel_rows": excel_rows,
+        "rejected_rows": rejected_rows,
         "start5_values": start5_values,
         "missing": [num for num in vmt_list if num not in processed],
         "comp_text": comp_text.strip(),
         "rejected_units": rejected_units,
         "incomplete_units": incomplete_units,
+        "row_stats": {
+            "min_cols_required": min_cols,
+            "rows_seen": rows_seen,
+            "rows_too_short": rows_too_short,
+            "widest_row": widest_row,
+        },
     }

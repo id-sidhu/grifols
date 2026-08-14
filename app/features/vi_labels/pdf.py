@@ -84,6 +84,13 @@ def generate_vi_labels_pdf(
             c.drawString(x + label_w - num_w - 3 * mm, y + label_h - 4 * mm, num_str)
             c.setFillColorRGB(0, 0, 0)
 
+        # Quarantine header — bold, centered, top of label
+        header_str = "QUARANTINE - PACKAGED PLASMA"
+        header_sz = _fit_size(header_str, "Helvetica-Bold", inner_w, start=18)
+        c.setFont("Helvetica-Bold", header_sz)
+        c.setFillColorRGB(0, 0, 0)
+        c.drawCentredString(cx, y + label_h - 8 * mm, header_str)
+
         # Date range — normal font, large
         date_sz = _fit_size(date_str, "Helvetica", inner_w, start=60)
         c.setFont("Helvetica", date_sz)

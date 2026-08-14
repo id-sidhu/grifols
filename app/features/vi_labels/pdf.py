@@ -84,18 +84,18 @@ def generate_vi_labels_pdf(
             c.drawString(x + label_w - num_w - 3 * mm, y + label_h - 4 * mm, num_str)
             c.setFillColorRGB(0, 0, 0)
 
-        # Quarantine header — bold, centered, top of label
+        # Quarantine header — bold, centered, evenly spaced above the date
         header_str = "QUARANTINE - PACKAGED PLASMA"
-        header_sz = _fit_size(header_str, "Helvetica-Bold", inner_w, start=18)
+        header_sz = _fit_size(header_str, "Helvetica-Bold", inner_w, start=26)
         c.setFont("Helvetica-Bold", header_sz)
         c.setFillColorRGB(0, 0, 0)
-        c.drawCentredString(cx, y + label_h - 8 * mm, header_str)
+        c.drawCentredString(cx, y + label_h * 0.78, header_str)
 
         # Date range — normal font, large
         date_sz = _fit_size(date_str, "Helvetica", inner_w, start=60)
         c.setFont("Helvetica", date_sz)
         c.setFillColorRGB(0, 0, 0)
-        c.drawCentredString(cx, y + label_h * 0.56, date_str)
+        c.drawCentredString(cx, y + label_h * 0.50, date_str)
 
         # ID range — all normal font, same size; last 3 digits bold with 1 space before them
         sizing_str = (
@@ -120,7 +120,7 @@ def generate_vi_labels_pdf(
 
         total_w = left_w + gap_w + dash_w + (gap_w + right_w if id_right else 0)
         sx = cx - total_w / 2
-        base_y = y + label_h * 0.28
+        base_y = y + label_h * 0.22
 
         def _draw_id(draw_x: float, sid: str) -> float:
             pre = sid[:-3] if len(sid) > 3 else ""
